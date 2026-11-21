@@ -1,0 +1,57 @@
+{
+  "name": "manucodeai",
+  "displayName": "ManuCodeAI Developer",
+  "description": "AI coding agent powered by ManuCodeAI",
+  "version": "0.3.0",
+  "publisher": "manucodeai",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onView:manucodeai.chat"
+  ],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "npm run compile"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "manucodeai",
+          "title": "ManuCodeAI",
+          "icon": "resources/manucodeai.svg"
+        }
+      ]
+    },
+    "views": {
+      "manucodeai": [
+        {
+          "id": "manucodeai.chat",
+          "name": "AI Coding Assistant",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "manucodeai.newChat",
+        "title": "ManuCodeAI: New Chat"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^4.1.1",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0"
+  }
+}
+
