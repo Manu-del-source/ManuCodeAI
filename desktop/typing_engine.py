@@ -42,6 +42,8 @@ VK_S = 0x53
 VK_A = 0x41
 VK_RETURN = 0x0D
 VK_TAB = 0x09
+CF_UNICODETEXT = 13
+GMEM_MOVEABLE = 0x0002
 
 
 class TypingCancelled(Exception):
@@ -51,10 +53,9 @@ class TypingCancelled(Exception):
 class WindowsTypingEngine:
     """Types code progressively with a steady pace and small natural pauses."""
 
-    def __init__(self, min_delay: float = 0.12, max_delay: float = 0.20,
-                 line_delay_min: float = 0.80, line_delay_max: float = 1.20):
-        # Deliberately slow defaults: visible editor typing should be readable,
-        # not a near-instant paste disguised as keyboard input.
+    def __init__(self, min_delay: float = 0.18, max_delay: float = 0.28,
+                 line_delay_min: float = 1.00, line_delay_max: float = 1.40):
+        # Slow, deliberate character entry with a longer pause between lines.
         self.min_delay = min_delay
         self.max_delay = max_delay
         self.line_delay_min = line_delay_min
@@ -87,54 +88,127 @@ class WindowsTypingEngine:
         for key in reversed(keys):
             cls._key(key, key_up=True)
 
+    @staticmethod
+    def _clipboard_get_unicode_text() -> str | None:
+        """Read existing plain-text clipboard content so it can be restored."""
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        if not user32.OpenClipboard(None):
+            return None
+        try:
+            handle = user32.GetClipboardData(CF_UNICODETEXT)
+            if not handle:
+                return None
+            kernel32.GlobalLock.restype = ctypes.c_void_p
+            pointer = kernel32.GlobalLock(handle)
+            if not pointer:
+                return None
+            try:
+                return ctypes.wstring_at(pointer)
+            finally:
+                kernel32.GlobalUnlock(handle)
+        finally:
+            user32.CloseClipboard()
+
+    @staticmethod
+    def _clipboard_set_unicode_text(value: str) -> None:
+        """Set plain text on the clipboard for a paste that bypasses editor auto-indent."""
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        data = (value + "\\0").encode("utf-16-le")
+        if not user32.OpenClipboard(None):
+            raise ctypes.WinError()
+        handle = None
+        try:
+            if not user32.EmptyClipboard():
+                raise ctypes.WinError()
+            kernel32.GlobalAlloc.restype = ctypes.c_void_p
+            handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+            if not handle:
+                raise ctypes.WinError()
+            kernel32.GlobalLock.restype = ctypes.c_void_p
+            pointer = kernel32.GlobalLock(handle)
+            if not pointer:
+                raise ctypes.WinError()
+            try:
+                ctypes.memmove(pointer, data, len(data))
+            finally:
+                kernel32.GlobalUnlock(handle)
+            if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+                raise ctypes.WinError()
+            handle = None  # The system owns the memory after SetClipboardData.
+        finally:
+            if handle:
+                kernel32.GlobalFree(handle)
+            user32.CloseClipboard()
+
+    @classmethod
+    def _paste_clipboard(cls) -> None:
+        cls.shortcut(VK_CONTROL, 0x56)  # Ctrl+V
+
     def type_text(self, text: str, cancel_event: threading.Event | None = None,
                   progress_callback=None) -> None:
         if sys.platform != "win32":
             raise OSError("ManuCodeAI's visible typing engine requires Windows.")
 
-        # Normalize Windows CRLF and legacy CR endings to one real newline.
-        # This guarantees one Enter keystroke for every line break.
+        # Ctrl+V inserts a literal newline without triggering VS Code's automatic
+        # indentation. The next line's spaces are then typed exactly as generated.
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         total = len(text)
+        previous_clipboard = self._clipboard_get_unicode_text()
+        clipboard_changed = False
 
-        for index, character in enumerate(text, start=1):
-            if cancel_event and cancel_event.is_set():
-                raise TypingCancelled("Typing was stopped by the user.")
+        try:
+            for index, character in enumerate(text, start=1):
+                if cancel_event and cancel_event.is_set():
+                    raise TypingCancelled("Typing was stopped by the user.")
 
-            if character == "\n":
-                self.shortcut(VK_RETURN)
-            elif character == "\t":
-                self.shortcut(VK_TAB)
-            else:
-                encoded = character.encode("utf-16-le")
-                for offset in range(0, len(encoded), 2):
-                    unit = int.from_bytes(encoded[offset:offset + 2], "little")
+                if character == "\n":
+                    self._clipboard_set_unicode_text("\n")
+                    clipboard_changed = True
+                    self._paste_clipboard()
+                elif character == "\t":
+                    encoded = "\t".encode("utf-16-le")
+                    unit = int.from_bytes(encoded, "little")
                     self._send_input(unit, KEYEVENTF_UNICODE)
                     self._send_input(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
+                else:
+                    encoded = character.encode("utf-16-le")
+                    for offset in range(0, len(encoded), 2):
+                        unit = int.from_bytes(encoded[offset:offset + 2], "little")
+                        self._send_input(unit, KEYEVENTF_UNICODE)
+                        self._send_input(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
 
-            if progress_callback and (character == "\n" or index % 25 == 0 or index == total):
-                progress_callback(index, total)
+                if progress_callback and (
+                    character == "\n" or index % 25 == 0 or index == total
+                ):
+                    progress_callback(index, total)
 
-            if character == "\n":
-                # Pause after completing each line before typing the next one.
-                delay = self._random.uniform(self.line_delay_min, self.line_delay_max)
-            else:
-                delay = self._random.uniform(self.min_delay, self.max_delay)
-                if character in ",;":
-                    delay += self._random.uniform(0.16, 0.28)
-                elif character in ".!?":
-                    delay += self._random.uniform(0.22, 0.38)
-                elif character in "{}[]()":
-                    delay += self._random.uniform(0.06, 0.13)
-                elif character == " ":
-                    delay += self._random.uniform(0.02, 0.05)
+                if character == "\n":
+                    delay = self._random.uniform(
+                        self.line_delay_min, self.line_delay_max
+                    )
+                else:
+                    delay = self._random.uniform(self.min_delay, self.max_delay)
+                    if character in ",;":
+                        delay += self._random.uniform(0.16, 0.28)
+                    elif character in ".!?":
+                        delay += self._random.uniform(0.22, 0.38)
+                    elif character in "{}[]()":
+                        delay += self._random.uniform(0.06, 0.13)
+                    elif character == " ":
+                        delay += self._random.uniform(0.02, 0.05)
 
-            # Event.wait keeps Stop responsive during long typing delays.
-            if cancel_event:
-                if cancel_event.wait(delay):
-                    raise TypingCancelled("Typing was stopped by the user.")
-            else:
-                time.sleep(delay)
+                if cancel_event:
+                    if cancel_event.wait(delay):
+                        raise TypingCancelled("Typing was stopped by the user.")
+                else:
+                    time.sleep(delay)
+        finally:
+            # Restore previous plain text if the clipboard contained text.
+            # If it held a non-text format, it cannot be reconstructed here.
+            if clipboard_changed and previous_clipboard is not None:
+                self._clipboard_set_unicode_text(previous_clipboard)
 
     @classmethod
     def replace_current_document(cls) -> None:
