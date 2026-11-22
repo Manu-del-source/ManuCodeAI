@@ -287,6 +287,8 @@ class CodingAgent:
 
         if previous.get("task") == prompt and previous.get("status") in {"running", "paused"}:
             self.progress = previous
+            self.progress["status"] = "running"
+            self.progress["resumed_at"] = datetime.now(timezone.utc).isoformat()
             recent = previous.get("events", [])[-30:]
             summary = "\n".join(
                 "- Round {}: {} {}".format(
@@ -566,7 +568,7 @@ class CodingAgent:
         history: list[dict] = [{"role": "user", "content": prompt}]
         for round_number in range(1, MAX_AGENT_ROUNDS + 1):
             self._check_cancelled()
-            self.status(f"Analysing project — agent round {round_number + 1}")
+            self.status(f"Analysing project — agent round {round_number}/{MAX_AGENT_ROUNDS}")
             try:
                 response = self.client.messages.create(
                     model=self.model,
@@ -598,21 +600,21 @@ class CodingAgent:
                 return "\n".join(text_parts) or "The model returned an empty response."
 
             history.append({"role": "assistant", "content": response.content})
-            history.append({"role": "user", "content": tool_results})
             if round_number % CONTINUATION_INTERVAL == 0 and round_number < MAX_AGENT_ROUNDS:
                 phase = round_number // CONTINUATION_INTERVAL + 1
                 self.status(
                     f"Continuing development — phase {phase}; "
                     f"checkpoint saved after {round_number} rounds."
                 )
-                history.append({
-                    "role": "user",
-                    "content": (
+                tool_results.append({
+                    "type": "text",
+                    "text": (
                         "Continue the same development task. This is an automatic continuation, "
                         "not a new task. Avoid repeating completed actions. Continue implementation, "
                         "verification, and fixes until the task is genuinely complete."
                     ),
                 })
+            history.append({"role": "user", "content": tool_results})
 
         raise AgentError(
             f"The agent reached the {MAX_AGENT_ROUNDS}-round safety limit. "
