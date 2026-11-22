@@ -55,6 +55,20 @@ py -m desktop.app
 
 VS Code must be installed and its `code` command must be available on PATH.
 
+## Autonomous long-task continuation
+
+- The coding agent supports up to 60 model rounds by default, split into continuation
+  phases every 12 rounds. It continues the same conversation instead of stopping at
+  the former 12-round ceiling.
+- A compact checkpoint is stored in `.manucodeai/progress.json` inside the selected
+  project. It records the original task and tool/file activity, but does not store
+  terminal output, API keys, or command arguments.
+- If the app is stopped or the round safety limit is reached, starting the exact same
+  task again in the same project resumes from the checkpoint. The agent must inspect
+  current files before repeating work.
+- Set `MANUCODE_MAX_ROUNDS` before launching the app to change the limit. The minimum
+  supported value is 12; the default is 60.
+
 ## Important limitations
 
 - The app targets Windows.
