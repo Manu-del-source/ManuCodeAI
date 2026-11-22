@@ -127,7 +127,7 @@ class WindowsTypingEngine:
         kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
         user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
         user32.SetClipboardData.restype = ctypes.c_void_p
-        data = (value + "\\0").encode("utf-16-le")
+        data = (value + "\0").encode("utf-16-le")
         if not user32.OpenClipboard(None):
             raise ctypes.WinError()
         handle = None
