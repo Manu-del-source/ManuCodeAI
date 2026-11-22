@@ -65,8 +65,17 @@ class VSCodeController:
             user32.EnumWindows(visit, 0)
             if matched.value:
                 user32.ShowWindow(matched, 9)  # SW_RESTORE
-                user32.SetForegroundWindow(matched)
+                if not user32.SetForegroundWindow(matched):
+                    raise VSCodeError(
+                        "Windows did not allow ManuCodeAI to focus VS Code. "
+                        "Bring the intended VS Code window to the foreground and retry."
+                    )
                 time.sleep(0.25)
+                if user32.GetForegroundWindow() != matched.value:
+                    raise VSCodeError(
+                        "VS Code did not become the foreground window. "
+                        "No code was typed to avoid sending keystrokes to another app."
+                    )
                 return
             time.sleep(0.2)
         raise VSCodeError(
