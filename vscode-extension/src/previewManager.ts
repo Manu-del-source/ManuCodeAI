@@ -6,6 +6,11 @@
  * previews per file, and tracks each preview's generation state
  * (streaming → ready → cancelled → applied/rejected).
  *
+ * Reveal speed is decoupled from stream speed: chunks handed to
+ * `appendPreview` are queued in a per-file Typewriter and typed into the
+ * editor at the configured human-like rate. The SSE reader keeps consuming
+ * the backend stream at full speed — only the visual update is paced.
+ *
  * The manager never touches workspace files — it only allocates untitled
  * in-memory documents. Workspace writes happen exclusively in the approval
  * path.
@@ -14,6 +19,11 @@
 import * as vscode from "vscode";
 import { languageForFile } from "./core/language";
 import { FilePreviewSession, PreviewStatus } from "./core/previewTracker";
+import {
+    DEFAULT_CHARS_PER_SECOND,
+    Typewriter,
+    resolveCharsPerSecond,
+} from "./core/typewriter";
 
 export interface ManagedPreview {
     /** Tool call index (stable id for the preview). */
@@ -26,10 +36,32 @@ export interface ManagedPreview {
     status: PreviewStatus;
     createdAt: number;
     updatedAt: number;
+    /** Last time the end of the document was revealed (throttles scrolling). */
+    lastRevealAt: number;
 }
 
 export class PreviewManager {
     private previews = new Map<number, ManagedPreview>();
+    private typers = new Map<number, Typewriter>();
+    private charsPerSecond = DEFAULT_CHARS_PER_SECOND;
+
+    /**
+     * Set the editor typing speed. Accepts a speed name ("slow" | "normal" |
+     * "fast") or a custom characters-per-second number; invalid values fall
+     * back to the default (35 cps). Live previews adopt the new rate for any
+     * text that has not been revealed yet.
+     */
+    setTypingSpeed(value: unknown): void {
+        this.charsPerSecond = resolveCharsPerSecond(value);
+        for (const typer of this.typers.values()) {
+            typer.setSpeed(this.charsPerSecond);
+        }
+    }
+
+    /** Characters per second currently used for reveals. */
+    get typingSpeed(): number {
+        return this.charsPerSecond;
+    }
 
     /**
      * Drop all previews from previous rounds/requests without closing or
@@ -37,6 +69,7 @@ export class PreviewManager {
      * by the host). Called when a new agent round starts.
      */
     clearStalePreviews(): void {
+        this.cancelAllTyping();
         this.previews.clear();
     }
 
@@ -70,6 +103,7 @@ export class PreviewManager {
             status: "streaming",
             createdAt: Date.now(),
             updatedAt: Date.now(),
+            lastRevealAt: 0,
         };
 
         try {
@@ -91,32 +125,52 @@ export class PreviewManager {
     }
 
     /**
-     * Append a genuinely-decoded incremental chunk to the preview document.
-     * The editor is updated as chunks arrive — never as a completed file.
+     * Queue a genuinely-decoded incremental chunk for the preview editor.
+     *
+     * The call returns as soon as the chunk is queued — it never waits for
+     * the typing pace, so the stream reader is not back-pressured. The
+     * queued text is typed into the document character-by-character (or in
+     * very small chunks) by the preview's typewriter.
      */
     async appendPreview(index: number, delta: string): Promise<ManagedPreview | undefined> {
         const preview = this.previews.get(index);
         if (!preview || !delta) return preview;
+        if (preview.status === "cancelled") return preview;
 
-        preview.content += delta;
-        preview.updatedAt = Date.now();
-
-        if (preview.doc && preview.editor) {
-            try {
-                const editor = preview.editor;
-                const doc = preview.doc;
-                const endPos = doc.positionAt(doc.getText().length);
-                const ok = await editor.edit((editBuilder) => {
-                    editBuilder.insert(endPos, delta);
-                });
-                if (ok) this.revealEnd(preview);
-            } catch {
-                // The user closed the preview editor or the document — the
-                // preview is best-effort.
-            }
-        }
-
+        this.typewriterFor(index).push(delta);
         return preview;
+    }
+
+    /**
+     * Wait until every queued character of a preview has been revealed (or
+     * the typing was cancelled). Used after the stream ends so the native
+     * diff and the approval dialog always see the complete file.
+     */
+    async flushTyping(index: number): Promise<void> {
+        const typer = this.typers.get(index);
+        if (!typer) return;
+        await typer.drain();
+    }
+
+    /**
+     * Stop the visual typing immediately: drop every queued (not yet shown)
+     * chunk and clear all pending reveal timers. Text already on screen is
+     * kept so the incomplete preview stays visible.
+     */
+    cancelTyping(index?: number): void {
+        if (index !== undefined) {
+            this.typers.get(index)?.cancel();
+            return;
+        }
+        for (const typer of this.typers.values()) {
+            typer.cancel();
+        }
+    }
+
+    /** Cancel typing and forget every typewriter (Stop / new round). */
+    cancelAllTyping(): void {
+        this.cancelTyping();
+        this.typers.clear();
     }
 
     setStatus(index: number, status: PreviewStatus): ManagedPreview | undefined {
@@ -133,6 +187,8 @@ export class PreviewManager {
      */
     async closePreview(index: number): Promise<void> {
         const preview = this.previews.get(index);
+        this.typers.get(index)?.cancel();
+        this.typers.delete(index);
         if (!preview) return;
         this.previews.delete(index);
         const doc = preview.doc;
@@ -151,14 +207,20 @@ export class PreviewManager {
 
     /** Mark a preview cancelled (Stop pressed) — keep the content visible. */
     markCancelled(index: number): void {
+        this.cancelTyping(index);
         const preview = this.previews.get(index);
         if (!preview) return;
         preview.status = "cancelled";
         preview.updatedAt = Date.now();
     }
 
-    /** Cancel every open streaming preview (Stop pressed mid-generation). */
+    /**
+     * Cancel every open streaming preview (Stop pressed mid-generation):
+     * pending typing is dropped first, then the previews are marked
+     * cancelled.
+     */
     markAllCancelled(): void {
+        this.cancelAllTyping();
         for (const preview of this.previews.values()) {
             if (preview.status === "streaming" || preview.status === "ready") {
                 preview.status = "cancelled";
@@ -174,6 +236,8 @@ export class PreviewManager {
     async setContent(index: number, content: string): Promise<ManagedPreview | undefined> {
         const preview = this.previews.get(index);
         if (!preview) return undefined;
+        // A wholesale replacement supersedes any queued typing.
+        this.typers.get(index)?.cancel();
         preview.content = content;
         preview.updatedAt = Date.now();
         if (preview.doc && preview.editor) {
@@ -196,6 +260,54 @@ export class PreviewManager {
             }
         }
         return preview;
+    }
+
+    /**
+     * Lazily create the paced reveal for a preview. Each file has its own
+     * queue/timer, so multiple files type into their own tabs concurrently.
+     */
+    private typewriterFor(index: number): Typewriter {
+        const existing = this.typers.get(index);
+        if (existing) return existing;
+
+        const typer = new Typewriter({
+            charsPerSecond: this.charsPerSecond,
+            onType: (text) => this.revealChunk(index, text),
+        });
+        this.typers.set(index, typer);
+        return typer;
+    }
+
+    /**
+     * Append one revealed chunk to the preview document. `onType` is awaited
+     * by the typewriter, so inserts are strictly ordered and never overlap.
+     */
+    private async revealChunk(index: number, text: string): Promise<void> {
+        const preview = this.previews.get(index);
+        if (!preview || preview.status === "cancelled") return;
+
+        preview.content += text;
+        preview.updatedAt = Date.now();
+
+        if (!preview.doc || !preview.editor) return;
+
+        try {
+            const editor = preview.editor;
+            const doc = preview.doc;
+            const endPos = doc.positionAt(doc.getText().length);
+            const ok = await editor.edit((editBuilder) => {
+                editBuilder.insert(endPos, text);
+            });
+            // Typing fires many small edits per second; scrolling at the same
+            // rate would be wasteful, so follow the cursor at most ~8x/s.
+            if (ok && Date.now() - preview.lastRevealAt >= 120) {
+                preview.lastRevealAt = Date.now();
+                this.revealEnd(preview);
+            }
+        } catch {
+            // The user closed the preview editor or the document — the
+            // preview is best-effort.
+        }
     }
 
     private applySessionPath(preview: ManagedPreview, session: FilePreviewSession): void {

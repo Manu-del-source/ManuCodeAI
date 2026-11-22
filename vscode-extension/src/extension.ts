@@ -113,11 +113,22 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
         this.editorTracker = new ActiveEditorTracker();
         this.previewManager = new PreviewManager();
         this.previewDir = path.join(context.globalStorageUri.fsPath, "previews");
+        this.applyTypingSpeed();
     }
 
     dispose(): void {
         this.editorTracker.dispose();
+        this.previewManager.cancelAllTyping();
         this.abortController?.abort();
+    }
+
+    /**
+     * Apply the `manucodeai.typingSpeed` setting to the editor reveal pace.
+     * Only editor rendering is affected — generation speed is untouched.
+     */
+    public applyTypingSpeed(): void {
+        const configured = vscode.workspace.getConfiguration("manucodeai").get("typingSpeed");
+        this.previewManager.setTypingSpeed(configured);
     }
 
     public newChat(): void {
@@ -166,8 +177,12 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
         }
 
         if (message.command === "stop") {
-            // Abort the backend stream and the previews' updates. The
-            // preview tabs are marked incomplete — never executed.
+            // Stop immediately: drop every queued (not yet shown) character
+            // and clear pending reveal timers before aborting the stream, so
+            // no editor update lands after the click. The preview tabs are
+            // marked incomplete — never executed.
+            this.previewManager.cancelAllTyping();
+            this.previewManager.markAllCancelled();
             this.abortController?.abort();
             return;
         }
@@ -348,7 +363,49 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
 
         const runner = new AgentStreamRunner(event => this.handleStreamEvent(view, event));
         const result = await runner.run(response.body);
+
+        // The stream is consumed at full speed; let the paced editor reveals
+        // catch up before the round ends. Approval/diff review only ever sees
+        // the fully typed file. Cancellation resolves this immediately.
+        if (!result.cancelled && !result.error) {
+            await this.finishTyping(view, result);
+        }
+
         return result;
+    }
+
+    /**
+     * Wait for each preview's typewriter to drain, then finalize the tabs:
+     * backstop any content the editor never showed (e.g. a file whose
+     * content only arrived in the final tool_call event) and mark them ready
+     * for review.
+     */
+    private async finishTyping(view: vscode.WebviewView, result: RunResult): Promise<void> {
+        for (const session of result.sessions) {
+            const preview = this.previewManager.get(session.index);
+            if (!preview) continue;
+            if (this.abortController?.signal.aborted) return;
+
+            await this.previewManager.flushTyping(session.index);
+
+            if (preview.status === "cancelled" || this.abortController?.signal.aborted) {
+                continue;
+            }
+
+            // Backstop: make any never-shown content visible.
+            const shown = preview.doc ? preview.doc.getText() : "";
+            if (session.content.length > 0 && shown !== session.content) {
+                await this.previewManager.setContent(session.index, session.content);
+            }
+
+            this.previewManager.setStatus(session.index, "ready");
+            this.post(view, {
+                command: "fileDone",
+                path: session.path,
+                lines: session.content.split("\n").length,
+                bytes: session.content.length,
+            });
+        }
     }
 
     /** Runner callback — drives the sidebar, the previews and baseline capture. */
@@ -384,22 +441,12 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
                 return;
             }
             case "fileDone": {
-                const session = event.session;
-                await this.previewManager.ensurePreview(session);
-                this.previewManager.setStatus(session.index, "ready");
-                // Backstop: make any never-shown content visible.
-                const preview = this.previewManager.get(session.index);
-                const doc = preview?.doc;
-                const shown = doc ? doc.getText() : "";
-                if (preview && shown !== session.content && session.content.length > 0) {
-                    await this.previewManager.setContent(session.index, session.content);
-                }
-                this.post(view, {
-                    command: "fileDone",
-                    path: session.path,
-                    lines: session.content.split("\n").length,
-                    bytes: session.content.length,
-                });
+                // The text is queued in the preview's typewriter and is still
+                // being revealed. Finalization (content backstop, ready
+                // status, "file ready" notice) happens in finishTyping once
+                // the paced reveal drains — that keeps the diff review and
+                // approval aligned with what the editor shows.
+                await this.previewManager.ensurePreview(event.session);
                 return;
             }
             case "done": {
@@ -1417,6 +1464,11 @@ export function activate(context: vscode.ExtensionContext): void {
             { webviewOptions: { retainContextWhenHidden: true } }
         ),
         vscode.commands.registerCommand("manucodeai.newChat", () => provider.newChat()),
+        vscode.workspace.onDidChangeConfiguration((event) => {
+            if (event.affectsConfiguration("manucodeai.typingSpeed")) {
+                provider.applyTypingSpeed();
+            }
+        }),
         { dispose: () => provider.dispose() }
     );
 
