@@ -271,8 +271,8 @@ class CodingAgent:
     def _run_command(self, command: str) -> str:
         self._check_cancelled()
         blocked = (
-            r"\\b(shutdown|restart-computer|stop-computer|diskpart|bcdedit|manage-bde|clear-disk|format-volume|remove-partition)\\b",
-            r"(?i)\\b(reg(?:\\.exe)?\\s+(add|delete)|format\\s+[a-z]:)\\b",
+            r"\b(shutdown|restart-computer|stop-computer|diskpart|bcdedit|manage-bde|clear-disk|format-volume|remove-partition)\b",
+            r"\b(reg(?:\.exe)?\s+(add|delete)|format\s+[a-z]:)\b",
         )
         if any(re.search(pattern, command, re.IGNORECASE) for pattern in blocked):
             return "Blocked unsafe system-level command. Keep operations within the selected project."
