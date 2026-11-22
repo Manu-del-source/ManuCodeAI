@@ -70,8 +70,10 @@ TOOLS = [
         "function": {
             "name": "write_file",
             "description": (
-                "Create or completely rewrite a project text file autonomously. Supply "
-                "the full final file content. The app types the content visibly into VS Code."
+                "Create a new project text file autonomously. For an existing file, prefer "
+                "edit_file with a precise old_text/new_text replacement. A successful full "
+                "write may not be repeated in the same session; use edit_file for corrections. "
+                "The app types the content visibly into VS Code."
             ),
             "parameters": {
                 "type": "object",
@@ -145,9 +147,13 @@ DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
 6. For an existing file, prefer edit_file with a small, exact old_text/new_text replacement.
    Use write_file for an existing file only when a substantial rewrite is genuinely necessary.
 7. Never call write_file or edit_file repeatedly with the same content. Do not rewrite a file
-   just to show progress. After a successful edit, inspect its result and move to the next task.
-8. If another change to a file is needed later, read the latest saved version first, identify
-   the exact defect or missing requirement, then make one targeted correction.
+   just to show progress. After a successful full write, that file is locked against another
+   full write for the rest of this session. Use edit_file for a specific correction.
+8. Maintain forward progress through the planned file list. After a file is successfully
+   written and verified, record it as completed in your working plan and move to the next
+   unfinished file. Do not keep reopening completed files without a concrete test failure,
+   syntax error, or unmet requirement. If a correction is necessary, read the latest version
+   and use one targeted edit, then rerun the relevant check.
 9. Do not make unrelated changes. Preserve existing architecture, naming, formatting, and behavior.
 10. After implementation, run focused syntax checks and relevant tests/build/lint commands.
     Review the output. Fix actual failures with targeted edits, then rerun the failed checks.
@@ -231,6 +237,9 @@ class CodingAgent:
         self.model = model
         self._read_since_write: set[str] = set()
         self._last_written_content: dict[str, str] = {}
+        # Enforce forward progress: a file gets at most one successful full write
+        # per session. Later corrections must use the targeted edit_file tool.
+        self._full_write_success: set[str] = set()
         self.progress_path = self.workspace / ".manucodeai" / PROGRESS_FILENAME
         self.progress: dict = {}
         if provider == "Coarena":
@@ -383,10 +392,17 @@ class CodingAgent:
         except UnicodeDecodeError:
             return "This file is not UTF-8 text and was not read."
 
-    def _write_file(self, filename: str, content: str) -> str:
+    def _write_file(self, filename: str, content: str, *, targeted_edit: bool = False) -> str:
         self._check_cancelled()
         path = self._safe_path(filename)
         relative = path.relative_to(self.workspace).as_posix()
+        if relative in self._full_write_success and not targeted_edit:
+            return (
+                f"Full write blocked for {relative}: this file has already been written "
+                "successfully in this session. Do not rewrite it. If a specific correction "
+                "is necessary, read the latest saved file and use edit_file with a unique "
+                "old_text/new_text replacement. Otherwise move on to the next planned file."
+            )
         if path.exists() and relative not in self._read_since_write:
             return (
                 f"Refusing to overwrite existing file {relative} because its latest contents "
@@ -447,6 +463,8 @@ class CodingAgent:
                 )
         self._read_since_write.discard(relative)
         self._last_written_content[relative] = content
+        if not targeted_edit:
+            self._full_write_success.add(relative)
         return f"Successfully typed, saved, and verified {relative}."
 
     def _edit_file(self, filename: str, old_text: str, new_text: str) -> str:
@@ -470,7 +488,7 @@ class CodingAgent:
             )
         updated = current.replace(old_text, new_text, 1)
         self._read_since_write.add(relative)
-        return self._write_file(relative, updated)
+        return self._write_file(relative, updated, targeted_edit=True)
 
     def _run_command(self, command: str) -> str:
         self._check_cancelled()
