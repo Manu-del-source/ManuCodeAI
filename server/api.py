@@ -472,6 +472,15 @@ async def agent_stream(http_request: Request, payload: AgentRequest):
         tool_order: list[int] = []
 
         try:
+            stream = await client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+                temperature=0.2,
+                stream=True,
+            )
+
             yield sse("start", {"session_id": payload.session_id, "current_file": current_file})
 
             async for chunk in stream:
@@ -492,7 +501,7 @@ async def agent_stream(http_request: Request, payload: AgentRequest):
                 if getattr(delta, "content", None):
                     accumulated_content += delta.content
                     # Heuristic: detect file paths in content
-                    lines = delta.content.split('\\n')
+                    lines = delta.content.split('\n')
                     for line in lines:
                         line_stripped = line.strip()
                         if line_stripped.startswith('File:') or line_stripped.startswith('file:'):
