@@ -56,7 +56,10 @@ class VSCodeController:
             length = user32.GetWindowTextLengthW(self._window_handle)
             title = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(self._window_handle, title, length + 1)
-            if "visual studio code" in title.value.lower():
+            if (
+                "visual studio code" in title.value.lower()
+                and filename.lower() in title.value.lower()
+            ):
                 matched.value = self._window_handle
 
         @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
