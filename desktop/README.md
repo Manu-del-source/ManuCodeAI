@@ -35,12 +35,11 @@ credential store. The API key is not written to project files or settings.
 - Editable model field for manually entering provider model IDs.
 - API-key persistence through the operating system credential store (keyring).
 - Project-folder selection.
-- Coding agent with project listing, file reading, approved file changes, and
-  approved command execution.
+- Coding agent with project listing, file reading, autonomous file changes, and
+  automatic PowerShell command execution.
 - VS Code launcher using the `code` command.
 - Native Windows `SendInput` Unicode typing, with variable character delays.
-- File changes and terminal commands are approved in ManuCodeAI, not through
-  VS Code popups.
+- File changes and project commands run automatically without per-action approval prompts.
 
 ## Development setup
 
@@ -66,8 +65,8 @@ VS Code must be installed and its `code` command must be available on PATH.
   by Coarena.
 - VS Code must be the foreground application when typing begins. Do not use
   the keyboard or switch applications during an active typing operation.
-- The current implementation asks for approval in ManuCodeAI before each file
-  change and terminal command.
+- The agent runs autonomously inside the selected project. It blocks selected high-risk
+  system administration commands and protects secret files and paths outside the project.
 - Registration, packaged installer work, and richer model capability checks
   remain future tasks.
 
