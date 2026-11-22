@@ -45,7 +45,6 @@ PROVIDERS = {
 class AgentWorker(QThread):
     status = Signal(str)
     log = Signal(str)
-    approval_requested = Signal(str, str, object)
     completed = Signal(str)
     failed = Signal(str)
 
@@ -60,15 +59,6 @@ class AgentWorker(QThread):
         self.prompt = prompt
         self.cancel_event = threading.Event()
 
-    def request_approval(self, title: str, detail: str) -> bool:
-        decision: dict[str, bool] = {}
-        gate = threading.Event()
-        self.approval_requested.emit(title, detail, (gate, decision))
-        while not gate.wait(0.1):
-            if self.cancel_event.is_set():
-                return False
-        return decision.get("approved", False)
-
     def run(self) -> None:
         try:
             self.status.emit("Opening project in Visual Studio Code...")
@@ -81,7 +71,6 @@ class AgentWorker(QThread):
                 model=self.model,
                 workspace=self.workspace,
                 vscode=vscode,
-                approve=self.request_approval,
                 status=self.status.emit,
                 cancel_event=self.cancel_event,
             )
@@ -313,18 +302,7 @@ class MainWindow(QMainWindow):
         self.worker.status.connect(self._log)
         self.worker.completed.connect(self._on_completed)
         self.worker.failed.connect(self._on_failed)
-        self.worker.approval_requested.connect(self._on_approval_requested)
         self.worker.start()
-
-    def _on_approval_requested(self, title: str, detail: str, payload: object) -> None:
-        gate, decision = payload
-        answer = QMessageBox.question(
-            self, title, detail,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        decision["approved"] = answer == QMessageBox.StandardButton.Yes
-        gate.set()
 
     def _on_completed(self, message: str) -> None:
         self._log("\n" + message)
