@@ -256,14 +256,6 @@ class MainWindow(QMainWindow):
                 "by your Coarena account.",
             )
             return
-        if provider == "Gemini":
-            QMessageBox.information(
-                self, "Gemini model selection",
-                "Use the default gemini-3.8-flash model or enter another model ID "
-                "available to your Google AI Studio API key. Gemini model discovery "
-                "is not yet supported by this button.",
-            )
-            return
         key = self.api_key.text().strip()
         if not key:
             QMessageBox.warning(
@@ -274,7 +266,7 @@ class MainWindow(QMainWindow):
         self.fetch_models_button.setEnabled(False)
         self._log(f"Fetching available {provider} models...")
         try:
-            models = discover_models(key, self.base_url.text().strip())
+            models = discover_models(key, self.base_url.text().strip(), provider)
             current = self.model.currentText().strip()
             self.model.clear()
             self.model.addItems(models)
@@ -283,6 +275,8 @@ class MainWindow(QMainWindow):
             elif models:
                 self.model.setCurrentIndex(0)
             self._log(f"Loaded {len(models)} model(s) from {provider}.")
+            if not models:
+                self._log("No compatible models were returned. Check API access and provider model availability.")
         except Exception as error:
             QMessageBox.critical(self, "Model discovery failed", str(error))
             self._log(f"Model discovery failed: {error}")
