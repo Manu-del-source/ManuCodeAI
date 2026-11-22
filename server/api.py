@@ -466,10 +466,10 @@ async def agent_stream(http_request: Request, payload: AgentRequest):
 
     async def generate():
         cancelled = False
-        current_file = None
         accumulated_content = ""
         tool_acc: dict[int, dict[str, str]] = {}
         tool_order: list[int] = []
+        tool_started: set[int] = set()
 
         try:
             stream = await client.chat.completions.create(
@@ -481,7 +481,7 @@ async def agent_stream(http_request: Request, payload: AgentRequest):
                 stream=True,
             )
 
-            yield sse("start", {"session_id": payload.session_id, "current_file": current_file})
+            yield sse("start", {"session_id": payload.session_id})
 
             async for chunk in stream:
                 if await http_request.is_disconnected():
@@ -497,17 +497,10 @@ async def agent_stream(http_request: Request, payload: AgentRequest):
 
                 delta = chunk.choices[0].delta
 
-                # Track file being generated from content patterns
+                # Track assistant text for the conversation history and
+                # the streamed explanation in the sidebar.
                 if getattr(delta, "content", None):
                     accumulated_content += delta.content
-                    # Heuristic: detect file paths in content
-                    lines = delta.content.split('\n')
-                    for line in lines:
-                        line_stripped = line.strip()
-                        if line_stripped.startswith('File:') or line_stripped.startswith('file:'):
-                            current_file = line_stripped.split(':', 1)[1].strip()
-                            yield sse("file_change", {"current_file": current_file})
-                            break
 
                 if getattr(delta, "tool_calls", None):
                     for tc in delta.tool_calls:
@@ -527,15 +520,29 @@ async def agent_stream(http_request: Request, payload: AgentRequest):
                         if func is not None:
                             if func.name:
                                 tool_acc[idx]["name"] = func.name
-                            if func.arguments:
-                                tool_acc[idx]["arguments"] += func.arguments
-                                yield sse(
-                                    "tool_call_delta",
-                                    {
-                                        "index": idx,
-                                        "id": tool_acc[idx]["id"],
-                                        "name": tool_acc[idx]["name"],
-                                        "arguments_delta": func.arguments,                                    },                                )
+
+                        if idx not in tool_started:
+                            tool_started.add(idx)
+                            yield sse(
+                                "tool_call_start",
+                                {
+                                    "index": idx,
+                                    "id": tool_acc[idx]["id"],
+                                    "name": tool_acc[idx]["name"],
+                                },
+                            )
+
+                        if func is not None and func.arguments:
+                            tool_acc[idx]["arguments"] += func.arguments
+                            yield sse(
+                                "tool_call_delta",
+                                {
+                                    "index": idx,
+                                    "id": tool_acc[idx]["id"],
+                                    "name": tool_acc[idx]["name"],
+                                    "arguments_delta": func.arguments,
+                                },
+                            )
 
                 # Yield content delta for live display
                 content_to_yield = getattr(delta, "content", "")
@@ -585,6 +592,7 @@ async def agent_stream(http_request: Request, payload: AgentRequest):
                 yield sse(
                     "tool_call",
                     {
+                        "index": idx,
                         "id": t["id"],
                         "name": t["name"],
                         "arguments": arguments,
@@ -604,7 +612,11 @@ async def agent_stream(http_request: Request, payload: AgentRequest):
                         "type": "function",
                         "function": {
                             "name": t["name"],
-                            "arguments": json.dumps(t["arguments"]),                        },                    }                    for t in requested_tools                ]
+                            "arguments": json.dumps(t["arguments"]),
+                        },
+                    }
+                    for t in requested_tools
+                ]
 
             assistant_msg = {
                 k: v for k, v in assistant_msg.items() if v is not None
@@ -621,7 +633,8 @@ async def agent_stream(http_request: Request, payload: AgentRequest):
                 {
                     "finished": finished,
                     "tool_calls": requested_tools,
-                    "response": accumulated_content,                },
+                    "response": accumulated_content,
+                },
             )
 
         except Exception as error:
@@ -635,8 +648,11 @@ async def agent_stream(http_request: Request, payload: AgentRequest):
 
     return StreamingResponse(
         generate(),
-        media_type="text/event-stream",        headers={
+        media_type="text/event-stream",
+        headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",        },    )
+            "X-Accel-Buffering": "no",
+        },
+    )
 
