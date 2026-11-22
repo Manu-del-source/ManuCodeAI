@@ -315,7 +315,6 @@ class CodingAgent:
                     system=SYSTEM_PROMPT,
                     messages=history,
                     tools=ANTHROPIC_TOOLS,
-                    temperature=0.2,
                 )
             except Exception as error:
                 raise AgentError(f"AI provider request failed: {error}") from error
