@@ -163,14 +163,14 @@ class CodingAgent:
                 base_url=base_url.rstrip("/"),
                 timeout=180.0,
             )
-        elif provider == "AgentRouter":
+        else:
+            # Gemini, OpenRouter, AgentRouter, and other OpenAI-compatible
+            # providers use the OpenAI client with their configured base URL.
             self.client = OpenAI(
                 api_key=api_key,
                 base_url=base_url.rstrip("/"),
                 timeout=180.0,
             )
-        else:
-            raise AgentError(f"Unsupported AI provider: {provider}")
 
     def _check_cancelled(self) -> None:
         if self.cancel_event.is_set():
