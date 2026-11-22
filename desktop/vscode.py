@@ -40,8 +40,7 @@ class VSCodeController:
             [self._code_command(), "--reuse-window", str(folder)], close_fds=True
         )
 
-    @staticmethod
-    def _focus_editor(filename: str, timeout: float = 8.0) -> None:
+    def _focus_editor(self, filename: str, timeout: float = 8.0) -> None:
         """Bring the VS Code window displaying filename to the foreground."""
         if not hasattr(ctypes, "windll"):
             raise VSCodeError("Window activation is available on Windows only.")
