@@ -79,6 +79,27 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "edit_file",
+            "description": (
+                "Make a targeted edit to an existing project text file. Provide an exact "
+                "old_text snippet and its replacement new_text. The old_text must occur "
+                "exactly once. Prefer this over rewriting an entire existing file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string"},
+                    "old_text": {"type": "string"},
+                    "new_text": {"type": "string"},
+                },
+                "required": ["filename", "old_text", "new_text"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_command",
             "description": "Run a project command autonomously in the selected project directory using PowerShell on Windows.",
             "parameters": {
@@ -106,23 +127,24 @@ You operate on the project folder selected by the user in the ManuCodeAI desktop
 application. Visual Studio Code is only the editor where code changes are shown.
 There is no ManuCodeAI VS Code extension and no chat interface inside VS Code.
 
-AUTONOMOUS WORKFLOW:
-1. Inspect the selected project with list_files. Confirm the actual directory contents.
-2. Read relevant source/configuration files before changing them.
-3. Form an implementation plan and proceed without waiting for user approval.
-4. Use write_file to create or update project files. Changes are executed automatically.
-5. Use run_command for installs, tests, builds, linters, and other relevant project work.
-6. Review every command result. Diagnose failures, correct the implementation, and retry
-   when appropriate. Treat tracebacks, compiler output, test failures, and lint diagnostics
-   as evidence: identify the file, line, root cause, and smallest safe correction.
-7. For every Python file you create or modify, ensure write_file accepts it through its
-   built-in ast syntax check. If it reports SyntaxError or IndentationError, read the
-   diagnostic carefully, fix the source, and call write_file again. Never ignore it.
-8. After Python changes, run a project-appropriate validation command such as
-   py -m compileall -q . (or py -m py_compile path\\to\\file.py for a focused check),
-   then run relevant tests. If a check fails, inspect the referenced source and repair it.
-10. Continue until the requested task is complete or a genuine blocker remains.
-11. Summarize files changed, commands run, test results, and any remaining blockers.
+DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
+1. Inspect the selected project and identify its language, framework, structure, and existing conventions.
+2. Read the task-relevant files. Do not guess how the project works from filenames alone.
+3. Before coding, form a short internal plan: list the intended files, the purpose of each change,
+   and how you will verify it. Do not send a separate planning-only response; continue working.
+4. Implement one logical change at a time. Finish and verify that change before moving to the next.
+5. For a new file, use write_file once with the complete initial content.
+6. For an existing file, prefer edit_file with a small, exact old_text/new_text replacement.
+   Use write_file for an existing file only when a substantial rewrite is genuinely necessary.
+7. Never call write_file or edit_file repeatedly with the same content. Do not rewrite a file
+   just to show progress. After a successful edit, inspect its result and move to the next task.
+8. If another change to a file is needed later, read the latest saved version first, identify
+   the exact defect or missing requirement, then make one targeted correction.
+9. Do not make unrelated changes. Preserve existing architecture, naming, formatting, and behavior.
+10. After implementation, run focused syntax checks and relevant tests/build/lint commands.
+    Review the output. Fix actual failures with targeted edits, then rerun the failed checks.
+11. Finish with a concise engineering report: files changed, behavior added/fixed, commands run,
+    test results, and anything not verified or still blocked.
 
 RULES:
 - Do not ask the user to approve individual file changes or terminal commands.
@@ -130,7 +152,11 @@ RULES:
 - Never read, print, copy, or modify secrets, credentials, private keys, or .env files.
 - Keep file operations inside the selected project directory.
 - Preserve unrelated user code and conventions.
-- Do not overwrite files without reading them first, unless they are new.
+- Do not overwrite existing files without reading their latest contents in this session.
+- Prefer edit_file for precise changes to existing files; its old_text must match exactly once.
+- Use write_file for new files or deliberate substantial rewrites only.
+- A successful write/edit is a completed step: do not repeat it unless verification reveals
+  a specific problem or a new requirement requires another change.
 - On Windows, run commands through PowerShell and prefer native PowerShell commands
   such as Get-ChildItem. Do not assume a Unix shell.
 - Prefer list_files for project discovery instead of shell directory-dump commands.
@@ -193,6 +219,8 @@ class CodingAgent:
         self.status = status or (lambda _message: None)
         self.cancel_event = cancel_event or threading.Event()
         self.model = model
+        self._read_since_write: set[str] = set()
+        self._last_written_content: dict[str, str] = {}
         if provider == "Coarena":
             self.client = Anthropic(
                 api_key=api_key,
@@ -266,7 +294,9 @@ class CodingAgent:
         if path.stat().st_size > 500_000:
             return "File is too large to read."
         try:
-            return path.read_text(encoding="utf-8")
+            content = path.read_text(encoding="utf-8")
+            self._read_since_write.add(path.relative_to(self.workspace).as_posix())
+            return content
         except UnicodeDecodeError:
             return "This file is not UTF-8 text and was not read."
 
@@ -274,6 +304,15 @@ class CodingAgent:
         self._check_cancelled()
         path = self._safe_path(filename)
         relative = path.relative_to(self.workspace).as_posix()
+        if path.exists() and relative not in self._read_since_write:
+            return (
+                f"Refusing to overwrite existing file {relative} because its latest contents "
+                "have not been read in this session. Call read_file first, inspect the current "
+                "content, then use edit_file for a targeted change or write_file for a justified "
+                "substantial rewrite."
+            )
+        if self._last_written_content.get(relative) == content:
+            return f"No change made to {relative}: this exact content was already written successfully."
         # Reject malformed Python before it reaches the visible editor. The model
         # receives the exact syntax error and can repair the file in its next turn.
         if path.suffix.lower() == ".py":
@@ -318,7 +357,32 @@ class CodingAgent:
                     f"Post-save Python validation failed in {relative} at line "
                     f"{error.lineno}: {error.msg}. Read the saved file, fix it, and retry."
                 )
+        self._read_since_write.discard(relative)
+        self._last_written_content[relative] = content
         return f"Successfully typed, saved, and verified {relative}."
+
+    def _edit_file(self, filename: str, old_text: str, new_text: str) -> str:
+        self._check_cancelled()
+        path = self._safe_path(filename)
+        relative = path.relative_to(self.workspace).as_posix()
+        if not path.is_file():
+            return f"Cannot edit {relative}: file does not exist. Use write_file to create a new file."
+        try:
+            current = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return f"Cannot edit {relative}: file is not UTF-8 text."
+        if not old_text:
+            return "Refusing an empty old_text match. Supply a specific existing code snippet."
+        matches = current.count(old_text)
+        if matches != 1:
+            return (
+                f"Targeted edit not applied to {relative}: old_text matched {matches} times; "
+                "it must match exactly once. Read the latest file, choose a more specific "
+                "snippet, and retry. No file content was changed."
+            )
+        updated = current.replace(old_text, new_text, 1)
+        self._read_since_write.add(relative)
+        return self._write_file(relative, updated)
 
     def _run_command(self, command: str) -> str:
         self._check_cancelled()
@@ -362,6 +426,8 @@ class CodingAgent:
                 return self._read_file(**arguments)
             if name == "write_file":
                 return self._write_file(**arguments)
+            if name == "edit_file":
+                return self._edit_file(**arguments)
             if name == "run_command":
                 return self._run_command(**arguments)
             return f"Unknown tool: {name}"
