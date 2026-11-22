@@ -1,8 +1,4 @@
-"""Native Windows keyboard typing for the standalone ManuCodeAI desktop app.
-
-Code is sent to the focused editor as Unicode keyboard input. It is not pasted
-from the clipboard, so the user can watch the source appear progressively.
-"""
+"""Native Windows keyboard typing for the standalone ManuCodeAI desktop app."""
 from __future__ import annotations
 
 import ctypes
@@ -17,37 +13,21 @@ if sys.platform == "win32":
     ULONG_PTR = wintypes.WPARAM
 
     class KEYBDINPUT(ctypes.Structure):
-        _fields_ = [
-            ("wVk", wintypes.WORD),
-            ("wScan", wintypes.WORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ULONG_PTR),
-        ]
+        _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
+                    ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                    ("dwExtraInfo", ULONG_PTR)]
 
     class MOUSEINPUT(ctypes.Structure):
-        _fields_ = [
-            ("dx", wintypes.LONG),
-            ("dy", wintypes.LONG),
-            ("mouseData", wintypes.DWORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ULONG_PTR),
-        ]
+        _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
+                    ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                    ("time", wintypes.DWORD), ("dwExtraInfo", ULONG_PTR)]
 
     class HARDWAREINPUT(ctypes.Structure):
-        _fields_ = [
-            ("uMsg", wintypes.DWORD),
-            ("wParamL", wintypes.WORD),
-            ("wParamH", wintypes.WORD),
-        ]
+        _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD),
+                    ("wParamH", wintypes.WORD)]
 
     class INPUT_UNION(ctypes.Union):
-        _fields_ = [
-            ("ki", KEYBDINPUT),
-            ("mi", MOUSEINPUT),
-            ("hi", HARDWAREINPUT),
-        ]
+        _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT), ("hi", HARDWAREINPUT)]
 
     class INPUT(ctypes.Structure):
         _anonymous_ = ("u",)
@@ -60,6 +40,8 @@ KEYEVENTF_UNICODE = 0x0004
 VK_CONTROL = 0x11
 VK_S = 0x53
 VK_A = 0x41
+VK_RETURN = 0x0D
+VK_TAB = 0x09
 
 
 class TypingCancelled(Exception):
@@ -67,7 +49,7 @@ class TypingCancelled(Exception):
 
 
 class WindowsTypingEngine:
-    """Types Unicode characters at a steady, human-readable pace."""
+    """Types code progressively with a steady pace and small natural pauses."""
 
     def __init__(self, min_delay: float = 0.025, max_delay: float = 0.065):
         self.min_delay = min_delay
@@ -77,35 +59,18 @@ class WindowsTypingEngine:
     @staticmethod
     def _send_input(scan_code: int, flags: int) -> None:
         if sys.platform != "win32":
-            raise OSError("Native editor typing is currently supported on Windows only.")
-
-        item = INPUT(
-            type=INPUT_KEYBOARD,
-            ki=KEYBDINPUT(
-                wVk=0,
-                wScan=scan_code,
-                dwFlags=flags,
-                time=0,
-                dwExtraInfo=0,
-            ),
-        )
+            raise OSError("Native editor typing is supported on Windows only.")
+        item = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(
+            wVk=0, wScan=scan_code, dwFlags=flags, time=0, dwExtraInfo=0))
         sent = ctypes.windll.user32.SendInput(1, ctypes.byref(item), ctypes.sizeof(INPUT))
         if sent != 1:
             raise ctypes.WinError()
 
-    @classmethod
-    def _key(cls, virtual_key: int, key_up: bool = False) -> None:
+    @staticmethod
+    def _key(virtual_key: int, key_up: bool = False) -> None:
         flags = KEYEVENTF_KEYUP if key_up else 0
-        item = INPUT(
-            type=INPUT_KEYBOARD,
-            ki=KEYBDINPUT(
-                wVk=virtual_key,
-                wScan=0,
-                dwFlags=flags,
-                time=0,
-                dwExtraInfo=0,
-            ),
-        )
+        item = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(
+            wVk=virtual_key, wScan=0, dwFlags=flags, time=0, dwExtraInfo=0))
         sent = ctypes.windll.user32.SendInput(1, ctypes.byref(item), ctypes.sizeof(INPUT))
         if sent != 1:
             raise ctypes.WinError()
@@ -117,12 +82,8 @@ class WindowsTypingEngine:
         for key in reversed(keys):
             cls._key(key, key_up=True)
 
-    def type_text(
-        self,
-        text: str,
-        cancel_event: threading.Event | None = None,
-        progress_callback=None,
-    ) -> None:
+    def type_text(self, text: str, cancel_event: threading.Event | None = None,
+                  progress_callback=None) -> None:
         if sys.platform != "win32":
             raise OSError("ManuCodeAI's visible typing engine requires Windows.")
 
@@ -131,12 +92,13 @@ class WindowsTypingEngine:
             if cancel_event and cancel_event.is_set():
                 raise TypingCancelled("Typing was stopped by the user.")
 
-            codepoint = ord(character)
-            if codepoint <= 0xFFFF:
-                self._send_input(codepoint, KEYEVENTF_UNICODE)
-                self._send_input(codepoint, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
+            if character == "\\r":
+                continue
+            if character == "\\n":
+                self.shortcut(VK_RETURN)
+            elif character == "\\t":
+                self.shortcut(VK_TAB)
             else:
-                # Encode non-BMP characters as UTF-16 surrogate pairs.
                 encoded = character.encode("utf-16-le")
                 for offset in range(0, len(encoded), 2):
                     unit = int.from_bytes(encoded[offset:offset + 2], "little")
@@ -151,16 +113,14 @@ class WindowsTypingEngine:
                 delay += self._random.uniform(0.08, 0.16)
             elif character in ".!?":
                 delay += self._random.uniform(0.12, 0.24)
-            elif character == "\n":
+            elif character == "\\n":
                 delay += self._random.uniform(0.12, 0.22)
             elif character in "{}[]()":
                 delay += self._random.uniform(0.025, 0.07)
-
             time.sleep(delay)
 
     @classmethod
     def replace_current_document(cls) -> None:
-        """Select the current editor document before a complete-file rewrite."""
         cls.shortcut(VK_CONTROL, VK_A)
 
     @classmethod
