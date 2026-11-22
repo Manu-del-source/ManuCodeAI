@@ -94,12 +94,15 @@ class MainWindow(QMainWindow):
         saved_provider = self.settings.value("provider", "AgentRouter")
         self.provider.setCurrentText(saved_provider if saved_provider in PROVIDERS else "AgentRouter")
 
-        provider_config = PROVIDERS[self.provider.currentText()]
-        self.base_url = QLineEdit(self.settings.value("base_url", provider_config["base_url"]))
+        self._active_provider = self.provider.currentText()
+        provider_config = PROVIDERS[self._active_provider]
+        self.base_url = QLineEdit(
+            self.settings.value(f"{self._active_provider}/base_url", provider_config["base_url"])
+        )
         self.model = QComboBox()
         self.model.setEditable(True)
         self.model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.model.setCurrentText(self.settings.value("model", ""))
+        self.model.setCurrentText(self.settings.value(f"{self._active_provider}/model", ""))
         self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key.setPlaceholderText("Paste your provider API key")
@@ -184,21 +187,28 @@ class MainWindow(QMainWindow):
             self._log("Secure credential storage is unavailable; the API key will not be restored.")
 
     def _provider_changed(self, provider: str) -> None:
+        previous = self._active_provider
+        self.settings.setValue(f"{previous}/base_url", self.base_url.text().strip())
+        self.settings.setValue(f"{previous}/model", self.model.currentText().strip())
         try:
             import keyring
-            keyring.set_password(APP_ORG, self._keyring_name(), self.api_key.text().strip())
+            keyring.set_password(APP_ORG, self._keyring_name(previous), self.api_key.text().strip())
             saved = keyring.get_password(APP_ORG, self._keyring_name(provider))
         except Exception:
             saved = None
+        self._active_provider = provider
         self.api_key.setText(saved or "")
-        self.base_url.setText(PROVIDERS[provider]["base_url"])
+        self.base_url.setText(
+            self.settings.value(f"{provider}/base_url", PROVIDERS[provider]["base_url"])
+        )
         self.model.clear()
-        self.model.setCurrentText("")
+        self.model.setCurrentText(self.settings.value(f"{provider}/model", ""))
 
     def _save_settings(self) -> None:
-        self.settings.setValue("provider", self.provider.currentText())
-        self.settings.setValue("base_url", self.base_url.text().strip())
-        self.settings.setValue("model", self.model.currentText().strip())
+        current_provider = self.provider.currentText()
+        self.settings.setValue("provider", current_provider)
+        self.settings.setValue(f"{current_provider}/base_url", self.base_url.text().strip())
+        self.settings.setValue(f"{current_provider}/model", self.model.currentText().strip())
         try:
             import keyring
             keyring.set_password(APP_ORG, self._keyring_name(), self.api_key.text().strip())
