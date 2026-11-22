@@ -1246,3 +1246,5 @@ window.addEventListener('message', event => {
 
 </body>
 </html>`
+    }
+}
