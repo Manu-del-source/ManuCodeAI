@@ -93,6 +93,10 @@ class WindowsTypingEngine:
         """Read existing plain-text clipboard content so it can be restored."""
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
+        user32.GetClipboardData.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
         if not user32.OpenClipboard(None):
             return None
         try:
@@ -115,6 +119,14 @@ class WindowsTypingEngine:
         """Set plain text on the clipboard for a paste that bypasses editor auto-indent."""
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
+        kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+        user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
+        user32.SetClipboardData.restype = ctypes.c_void_p
         data = (value + "\\0").encode("utf-16-le")
         if not user32.OpenClipboard(None):
             raise ctypes.WinError()
@@ -122,7 +134,6 @@ class WindowsTypingEngine:
         try:
             if not user32.EmptyClipboard():
                 raise ctypes.WinError()
-            kernel32.GlobalAlloc.restype = ctypes.c_void_p
             handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
             if not handle:
                 raise ctypes.WinError()
