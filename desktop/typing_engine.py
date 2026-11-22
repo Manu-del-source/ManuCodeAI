@@ -51,8 +51,8 @@ class TypingCancelled(Exception):
 class WindowsTypingEngine:
     """Types code progressively with a steady pace and small natural pauses."""
 
-    def __init__(self, min_delay: float = 0.075, max_delay: float = 0.14,
-                 line_delay_min: float = 0.55, line_delay_max: float = 0.95):
+    def __init__(self, min_delay: float = 0.12, max_delay: float = 0.20,
+                 line_delay_min: float = 0.80, line_delay_max: float = 1.20):
         # Deliberately slow defaults: visible editor typing should be readable,
         # not a near-instant paste disguised as keyboard input.
         self.min_delay = min_delay
@@ -92,16 +92,18 @@ class WindowsTypingEngine:
         if sys.platform != "win32":
             raise OSError("ManuCodeAI's visible typing engine requires Windows.")
 
+        # Normalize Windows CRLF and legacy CR endings to one real newline.
+        # This guarantees one Enter keystroke for every line break.
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
         total = len(text)
+
         for index, character in enumerate(text, start=1):
             if cancel_event and cancel_event.is_set():
                 raise TypingCancelled("Typing was stopped by the user.")
 
-            if character == "\\r":
-                continue
-            if character == "\\n":
+            if character == "\n":
                 self.shortcut(VK_RETURN)
-            elif character == "\\t":
+            elif character == "\t":
                 self.shortcut(VK_TAB)
             else:
                 encoded = character.encode("utf-16-le")
@@ -110,22 +112,22 @@ class WindowsTypingEngine:
                     self._send_input(unit, KEYEVENTF_UNICODE)
                     self._send_input(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
 
-            if progress_callback and (character == "\\n" or index % 25 == 0 or index == total):
+            if progress_callback and (character == "\n" or index % 25 == 0 or index == total):
                 progress_callback(index, total)
 
-            if character == "\\n":
-                # Finish the current line, pause, then begin the next line.
+            if character == "\n":
+                # Pause after completing each line before typing the next one.
                 delay = self._random.uniform(self.line_delay_min, self.line_delay_max)
             else:
                 delay = self._random.uniform(self.min_delay, self.max_delay)
                 if character in ",;":
-                    delay += self._random.uniform(0.12, 0.22)
+                    delay += self._random.uniform(0.16, 0.28)
                 elif character in ".!?":
-                    delay += self._random.uniform(0.18, 0.32)
+                    delay += self._random.uniform(0.22, 0.38)
                 elif character in "{}[]()":
-                    delay += self._random.uniform(0.05, 0.11)
+                    delay += self._random.uniform(0.06, 0.13)
                 elif character == " ":
-                    delay += self._random.uniform(0.015, 0.04)
+                    delay += self._random.uniform(0.02, 0.05)
 
             # Event.wait keeps Stop responsive during long typing delays.
             if cancel_event:
