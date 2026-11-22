@@ -266,10 +266,13 @@ class MainWindow(QMainWindow):
             return
         key = self.api_key.text().strip()
         if not key:
-            QMessageBox.warning(self, "API key required", "Enter your AgentRouter API key first.")
+            QMessageBox.warning(
+                self, "API key required",
+                f"Enter your {provider} API key first.",
+            )
             return
         self.fetch_models_button.setEnabled(False)
-        self._log("Fetching available AgentRouter models...")
+        self._log(f"Fetching available {provider} models...")
         try:
             models = discover_models(key, self.base_url.text().strip())
             current = self.model.currentText().strip()
@@ -279,7 +282,7 @@ class MainWindow(QMainWindow):
                 self.model.setCurrentText(current)
             elif models:
                 self.model.setCurrentIndex(0)
-            self._log(f"Loaded {len(models)} model(s) from AgentRouter.")
+            self._log(f"Loaded {len(models)} model(s) from {provider}.")
         except Exception as error:
             QMessageBox.critical(self, "Model discovery failed", str(error))
             self._log(f"Model discovery failed: {error}")
