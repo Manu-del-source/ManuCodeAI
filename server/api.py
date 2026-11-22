@@ -466,172 +466,177 @@ async def agent_stream(http_request: Request, payload: AgentRequest):
 
     async def generate():
         cancelled = False
+        current_file = None
+        accumulated_content = ""
+        tool_acc: dict[int, dict[str, str]] = {}
+        tool_order: list[int] = []
+
         try:
-            yield sse("start", {"session_id": payload.session_id})
+            stream = await client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+                temperature=0.2,
+                stream=True,
+            )
 
-            accumulated_content = ""
-            tool_acc: dict[int, dict[str, str]] = {}
-            tool_order: list[int] = []
+            yield sse("start", {"session_id": payload.session_id, "current_file": current_file})
 
-            try:
-                stream = await client.chat.completions.create(
-                    model=MODEL,
-                    messages=messages,
-                    tools=TOOLS,
-                    tool_choice="auto",
-                    temperature=0.2,
-                    stream=True,
-                )
+            async for chunk in stream:
+                if await http_request.is_disconnected():
+                    cancelled = True
+                    try:
+                        await stream.aclose()
+                    except Exception:
+                        pass
+                    break
 
-                async for chunk in stream:
-                    if await http_request.is_disconnected():
-                        cancelled = True
-                        try:
-                            await stream.aclose()
-                        except Exception:
-                            pass
-                        break
+                if not chunk.choices:
+                    continue
 
-                    if not chunk.choices:
-                        continue
+                delta = chunk.choices[0].delta
 
-                    delta = chunk.choices[0].delta
+                # Track file being generated from content patterns
+                if getattr(delta, "content", None):
+                    accumulated_content += delta.content
+                    # Heuristic: detect file paths in content
+                    lines = delta.content.split('\n')
+                    for line in lines:
+                        line_stripped = line.strip()
+                        if line_stripped.startswith('File:') or line_stripped.startswith('file:'):
+                            current_file = line_stripped.split(':', 1)[1].strip()
+                            yield sse("file_change", {"current_file": current_file})
+                            break
 
-                    if getattr(delta, "content", None):
-                        accumulated_content += delta.content
-                        yield sse("delta", {"content": delta.content})
+                if getattr(delta, "tool_calls", None):
+                    for tc in delta.tool_calls:
+                        idx = tc.index if tc.index is not None else 0
+                        if idx not in tool_acc:
+                            tool_acc[idx] = {
+                                "id": "",
+                                "name": "",
+                                "arguments": "",
+                            }
+                            tool_order.append(idx)
 
-                    if getattr(delta, "tool_calls", None):
-                        for tc in delta.tool_calls:
-                            idx = tc.index if tc.index is not None else 0
-                            if idx not in tool_acc:
-                                tool_acc[idx] = {
-                                    "id": "",
-                                    "name": "",
-                                    "arguments": "",
-                                }
-                                tool_order.append(idx)
+                        if tc.id:
+                            tool_acc[idx]["id"] = tc.id
 
-                            if tc.id:
-                                tool_acc[idx]["id"] = tc.id
+                        func = tc.function
+                        if func is not None:
+                            if func.name:
+                                tool_acc[idx]["name"] = func.name
+                            if func.arguments:
+                                tool_acc[idx]["arguments"] += func.arguments
+                                yield sse(
+                                    "tool_call_delta",
+                                    {
+                                        "index": idx,
+                                        "id": tool_acc[idx]["id"],
+                                        "name": tool_acc[idx]["name"],
+                                        "arguments_delta": func.arguments,                                    },                                )
 
-                            func = tc.function
-                            if func is not None:
-                                if func.name:
-                                    tool_acc[idx]["name"] = func.name
-                                if func.arguments:
-                                    tool_acc[idx]["arguments"] += func.arguments
-                                    yield sse(
-                                        "tool_call_delta",
-                                        {
-                                            "index": idx,
-                                            "id": tool_acc[idx]["id"],
-                                            "name": tool_acc[idx]["name"],
-                                            "arguments_delta": func.arguments,
-                                        },
-                                    )
+                # Yield content delta for live display
+                content_to_yield = getattr(delta, "content", "")
+                if content_to_yield:
+                    yield sse("delta", {"content": content_to_yield})
 
-                if cancelled:
+            if cancelled:
+                yield sse("cancelled", {})
+                return
+
+            # Validate and emit completed tool calls.
+            requested_tools: list[dict[str, Any]] = []
+
+            for idx in tool_order:
+                t = tool_acc[idx]
+                args_str = t["arguments"].strip() or "{}"
+
+                try:
+                    arguments = json.loads(args_str)
+                except json.JSONDecodeError:
+                    yield sse(
+                        "error",
+                        {"message": f"Malformed tool arguments for {t['name'] or 'unknown tool'}."},
+                    )
                     return
 
-                # Validate and emit completed tool calls.
-                requested_tools: list[dict[str, Any]] = []
+                if not isinstance(arguments, dict):
+                    yield sse(
+                        "error",
+                        {"message": f"Tool arguments must be an object for {t['name'] or 'unknown tool'}."},
+                    )
+                    return
 
-                for idx in tool_order:
-                    t = tool_acc[idx]
-                    args_str = t["arguments"].strip() or "{}"
+                if not t["id"] or not t["name"]:
+                    yield sse(
+                        "error",
+                        {"message": "Incomplete tool call received from provider."},
+                    )
+                    return
 
-                    try:
-                        arguments = json.loads(args_str)
-                    except json.JSONDecodeError:
-                        yield sse(
-                            "error",
-                            {"message": f"Malformed tool arguments for {t['name'] or 'unknown tool'}."},
-                        )
-                        return
+                requested_tools.append({
+                    "id": t["id"],
+                    "name": t["name"],
+                    "arguments": arguments,
+                })
 
-                    if not isinstance(arguments, dict):
-                        yield sse(
-                            "error",
-                            {"message": f"Tool arguments must be an object for {t['name'] or 'unknown tool'}."},
-                        )
-                        return
-
-                    if not t["id"] or not t["name"]:
-                        yield sse(
-                            "error",
-                            {"message": "Incomplete tool call received from provider."},
-                        )
-                        return
-
-                    requested_tools.append({
+                yield sse(
+                    "tool_call",
+                    {
                         "id": t["id"],
                         "name": t["name"],
                         "arguments": arguments,
-                    })
-
-                    yield sse(
-                        "tool_call",
-                        {
-                            "id": t["id"],
-                            "name": t["name"],
-                            "arguments": arguments,
-                        },
-                    )
-
-                # Preserve assistant message in session history.
-                assistant_msg: dict[str, Any] = {
-                    "role": "assistant",
-                    "content": accumulated_content or None,
-                }
-
-                if requested_tools:
-                    assistant_msg["tool_calls"] = [
-                        {
-                            "id": t["id"],
-                            "type": "function",
-                            "function": {
-                                "name": t["name"],
-                                "arguments": json.dumps(t["arguments"]),
-                            },
-                        }
-                        for t in requested_tools
-                    ]
-
-                assistant_msg = {
-                    k: v for k, v in assistant_msg.items() if v is not None
-                }
-
-                history.append(assistant_msg)
-
-                sessions.bound(payload.session_id, history)
-
-                finished = len(requested_tools) == 0
-
-                yield sse(
-                    "done",
-                    {
-                        "finished": finished,
-                        "tool_calls": requested_tools,
-                        "response": accumulated_content,
                     },
                 )
 
-            except Exception as error:
-                yield sse(
-                    "error",
-                    {"message": f"AI provider error: {str(error)}"},
-                )
+            # Preserve assistant message in session history.
+            assistant_msg: dict[str, Any] = {
+                "role": "assistant",
+                "content": accumulated_content or None,
+            }
+
+            if requested_tools:
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": t["id"],
+                        "type": "function",
+                        "function": {
+                            "name": t["name"],
+                            "arguments": json.dumps(t["arguments"]),                        },                    }                    for t in requested_tools                ]
+
+            assistant_msg = {
+                k: v for k, v in assistant_msg.items() if v is not None
+            }
+
+            history.append(assistant_msg)
+
+            sessions.bound(payload.session_id, history)
+
+            finished = len(requested_tools) == 0
+
+            yield sse(
+                "done",
+                {
+                    "finished": finished,
+                    "tool_calls": requested_tools,
+                    "response": accumulated_content,                },
+            )
+
+        except Exception as error:
+            yield sse(
+                "error",
+                {"message": f"AI provider error: {str(error)}"},
+            )
 
         finally:
             lock.release()
 
     return StreamingResponse(
         generate(),
-        media_type="text/event-stream",
-        headers={
+        media_type="text/event-stream",        headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+            "X-Accel-Buffering": "no",        },    )
+

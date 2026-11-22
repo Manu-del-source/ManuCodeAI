@@ -1,11 +1,11 @@
 import * as vscode from "vscode";
 import * as fs from "fs/promises";
 import * as path from "path";
-import { execFile } from "child_process";
+import { exec } from "child_process";
 import { promisify } from "util";
 import { randomUUID } from "crypto";
 
-const execFileAsync = promisify(execFile);
+const execAsync = promisify(exec);
 
 const API_URL = "http://127.0.0.1:8765";
 
@@ -83,12 +83,11 @@ class ActiveEditorTracker {
     private _activeEditor: vscode.TextEditor | undefined;
 
     constructor() {
-        this._onDidChangeListener = vscode.window.onDidChangeTextEditorEditor(
-            (e) => {
-                this._activeEditor = e.editor;
-            },
-            null,
-            this._onDidChangeListener.token
+        this._activeEditor = vscode.window.activeTextEditor;
+        this._onDidChangeListener = vscode.window.onDidChangeActiveTextEditor(
+            (editor) => {
+                this._activeEditor = editor;
+            }
         );
     }
 
@@ -98,6 +97,8 @@ class ActiveEditorTracker {
 
     dispose(): void {
         this._onDidChangeListener?.dispose();
+        this._onDidChangeListener = undefined;
+        this._activeEditor = undefined;
     }
 }
 
@@ -118,7 +119,9 @@ function generateDiff(original: string, newContent: string): CodeDiff {
 
         if (origLine === null && newLine === null) break;
         if (origLine === null) {
-            changes.push({ type: "insert", line: origIdx, text: newLine });
+            if (newLine !== null) {
+                changes.push({ type: "insert", line: origIdx, text: newLine });
+            }
             newIdx++;
         } else if (newLine === null) {
             changes.push({ type: "delete", line: origIdx });
@@ -145,20 +148,19 @@ function createTextEdit(change: CodeChange, original: string): vscode.TextEdit |
         return null;
     }
 
-    const startLine = lines[lineIndex];
-    const endLineIndex = lineIndex + 1 < lines.length ? lineIndex + 1 : lines.length;
-    const endLine = lines[endLineIndex - 1];
-
     const startPos = new vscode.Position(lineIndex, 0);
-    const endPos = new vscode.Position(endLineIndex, endLine.length);
+    const endLine = lines[lineIndex];
+    const endPos = new vscode.Position(lineIndex, endLine.length);
 
     if (change.type === "delete") {
         return new vscode.TextEdit(new vscode.Range(startPos, endPos), "");
     }
 
     if (change.type === "insert") {
-        const insertPos = new vscode.Position(lineIndex, 0);
-        return new vscode.TextEdit(new vscode.Range(insertPos, insertPos), change.text || "");
+        return new vscode.TextEdit(
+            new vscode.Range(new vscode.Position(lineIndex, 0), new vscode.Position(lineIndex, 0)),
+            change.text || ""
+        );
     }
 
     if (change.type === "modify") {
@@ -168,31 +170,33 @@ function createTextEdit(change: CodeChange, original: string): vscode.TextEdit |
     return null;
 }
 
-// Apply workspace edits
+// Apply workspace edits (line-based, safe for insertion/deletion)
 function applyWorkspaceEdits(original: string, changes: CodeChange[]): { newContent: string; edits: vscode.TextEdit[] } {
     const edits: vscode.TextEdit[] = [];
     const sortedChanges = [...changes].sort((a, b) => b.line - a.line);
+    const result = original.split("\n");
 
     for (const change of sortedChanges) {
         const edit = createTextEdit(change, original);
         if (edit) {
             edits.push(edit);
         }
+
+        if (change.type === "insert") {
+            const insertLine = Math.min(Math.max(change.line, 0), result.length);
+            result.splice(insertLine, 0, change.text ?? "");
+        } else if (change.type === "delete") {
+            if (change.line >= 0 && change.line < result.length) {
+                result.splice(change.line, 1);
+            }
+        } else if (change.type === "modify") {
+            if (change.line >= 0 && change.line < result.length) {
+                result[change.line] = change.text ?? "";
+            }
+        }
     }
 
-    // Build new content by applying edits in reverse order
-    let newContent = original;
-    // Apply from bottom to top to preserve line numbers
-    const reversedEdits = [...edits].reverse();
-    for (const edit of reversedEdits) {
-        const range = edit.range;
-        newContent = newContent.substring(0, range.start.line) + // Simplified
-            newContent.substring(0, range.start.character) +
-            edit.newText +
-            newContent.substring(range.end.line);
-    }
-
-    return { newContent, edits };
+    return { newContent: result.join("\n"), edits };
 }
 
 class ManuCodeAIProvider implements vscode.WebviewViewProvider {
@@ -200,14 +204,23 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
     private busy = false;
     private view: vscode.WebviewView | undefined;
     private abortController: AbortController | null = null;
-    private editorTracker: ActiveEditorTracker | null = null;
+    private editorTracker: ActiveEditorTracker;
 
     constructor(private readonly context: vscode.ExtensionContext) {
         this.editorTracker = new ActiveEditorTracker();
     }
 
     dispose(): void {
-        this.editorTracker?.dispose();
+        this.editorTracker.dispose();
+    }
+
+    public newChat(): void {
+        this.sessionId = randomUUID();
+        this.abortController?.abort();
+        if (this.view) {
+            this.view.webview.postMessage({ command: "clear" });
+            this.send(this.view, "System", "Started a new conversation.");
+        }
     }
 
     resolveWebviewView(view: vscode.WebviewView): void {
@@ -221,9 +234,7 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
 
         view.webview.onDidReceiveMessage(async message => {
             if (message.command === "newChat") {
-                this.sessionId = randomUUID();
-                view.webview.postMessage({ command: "clear" });
-                this.send(view, "System", "Started a new conversation.");
+                this.newChat();
                 return;
             }
 
@@ -269,14 +280,15 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
             }
 
             if (message.command === "getActiveEditor") {
+                const activeEditor = this.editorTracker.activeEditor;
                 view.webview.postMessage({
                     command: "activeEditorInfo",
-                    editor: this.editorTracker.activeEditor
+                    editor: activeEditor
                         ? {
-                              uri: this.editorTracker.activeEditor.document.uri.fsPath,
-                              languageId: this.editorTracker.activeEditor.document.languageId,
-                              selection: this.editorTracker.activeEditor.selection,
-                          }
+                            uri: activeEditor.document.uri.fsPath,
+                            languageId: activeEditor.document.languageId,
+                            selection: activeEditor.selection,
+                        }
                         : null,
                 });
                 return;
@@ -368,9 +380,14 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
                 throw new Error(detail);
             }
 
-            const result = await this.readSSE(view, response, toolCalls);
+            const { cancelled: streamCancelled } = await this.readSSE(view, response, toolCalls);
             nextMessage = null;
             toolResults = [];
+
+            if (streamCancelled) {
+                view.webview.postMessage({ command: "assistantEnd" });
+                return;
+            }
 
             if (toolCalls.length === 0) {
                 view.webview.postMessage({ command: "assistantEnd" });
@@ -405,7 +422,7 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
         operation: "create" | "edit" | "append" | "replace",
         code: string,
         description: string
-    ): Promise<void> {
+    ): Promise<string> {
         const target = await this.resolveWorkspacePath(targetFile, true);
 
         let oldContent = "";
@@ -419,7 +436,7 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
             }
 
             if (stat.size > MAX_CONTENT_SIZE) {
-                throw new Error("Existing file is too large to replace safely.");
+                return `Changes to ${targetFile} were skipped: the existing file is too large to replace safely (>${MAX_CONTENT_SIZE} bytes).`;
             }
 
             oldContent = await fs.readFile(target, "utf8");
@@ -430,11 +447,8 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
             }
         }
 
-        // Generate diff
-        const diff = generateDiff(oldContent, code);
-
-        // Show diff preview using VS Code's native diff editor
-        const storage = this.context.globalStorageUri.fsPath;
+        // Stage proposed changes in temporary files and show a native diff preview
+        const storage = path.join(this.context.globalStorageUri.fsPath, "previews");
         await fs.mkdir(storage, { recursive: true });
 
         const id = randomUUID();
@@ -451,127 +465,146 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
             `Proposed changes: ${targetFile}`
         );
 
-        // Clean up preview files
-        await fs.rm(oldPreview, { force: true }).catch(() => {});
-        await fs.rm(newPreview, { force: true }).catch(() => {});
+        try {
+            // Ask for approval
+            const choice = await vscode.window.showWarningMessage(
+                `${operation === "create" ? "Create" : "Modify"} ${targetFile}? Review the diff before approving.`,
+                { modal: true },
+                "Apply change",
+                "Reject change",
+                "Customize"
+            );
 
-        // Ask for approval
-        const choice = await vscode.window.showWarningMessage(
-            `${operation === "create" ? "Create" : "Modify"} ${targetFile}? Review the diff before approving.`,
-            { modal: true },
-            "Apply change",
-            "Reject change",
-            "Customize"
-        );
-
-        if (choice === "Apply change") {
-            // Check for conflicts
-            let latestContent = "";
-            let latestExists = false;
-
-            try {
-                const stat = await fs.stat(target);
-
-                if (!stat.isFile()) {
-                    throw new Error("The target is not a regular file.");
-                }
-
-                latestContent = await fs.readFile(target, "utf8");
-                latestExists = true;
-            } catch (error) {
-                if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-                    throw error;
-                }
+            if (choice === "Apply change") {
+                return await this.applyCodeChange(view, target, targetFile, oldContent, code);
             }
 
-            if (latestExists && latestContent !== oldContent) {
-                const conflictChoice = await vscode.window.showWarningMessage(
-                    `The file ${targetFile} has been modified since generation started. Apply changes anyway?`,
-                    { modal: true },
-                    "Apply anyway",
-                    "Cancel"
-                );
+            if (choice === "Customize") {
+                const customizeChoice = await vscode.window.showInputBox({
+                    placeHolder: "Enter modified code or instructions...",
+                    value: code,
+                    prompt: `Customize the proposed changes for ${targetFile}`,
+                });
 
-                if (conflictChoice !== "Apply anyway") {
-                    this.send(view, "System", `Changes to ${targetFile} were rejected due to conflict.`);
-                    return;
+                if (customizeChoice && customizeChoice.trim()) {
+                    const trimmed = customizeChoice.trim();
+
+                    await fs.writeFile(oldPreview, oldContent, "utf8");
+                    await fs.writeFile(newPreview, trimmed, "utf8");
+
+                    await vscode.commands.executeCommand(
+                        "vscode.diff",
+                        vscode.Uri.file(oldPreview),
+                        vscode.Uri.file(newPreview),
+                        `Customized changes: ${targetFile}`
+                    );
+
+                    const customizedChoice = await vscode.window.showWarningMessage(
+                        `Apply customized changes for ${targetFile}?`,
+                        { modal: true },
+                        "Apply",
+                        "Reject"
+                    );
+
+                    if (customizedChoice === "Apply") {
+                        return await this.applyCodeChange(view, target, targetFile, oldContent, trimmed);
+                    }
                 }
 
-                oldContent = latestContent;
-                // Re-generate diff with latest content
-                // (we already have the diff displayed, user confirmed anyway)
+                this.send(view, "System", `Changes to ${targetFile} were rejected. No file was modified.`);
+                return `Changes to ${targetFile} were rejected. No file was modified.`;
             }
 
-            // Apply the changes
-            const parent = path.dirname(target);
-            await fs.mkdir(parent, { recursive: true });
-            await fs.writeFile(target, code, "utf8");
-
-            // Open the file in VS Code
-            const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
-            await vscode.window.showTextDocument(document, {
-                preview: false,
-            });
-
-            this.send(view, "Progress", `Saved ${targetFile}. The file was opened in VS Code.`);
-        } else if (choice === "Customize") {
-            const customizeChoice = await vscode.window.showInputBox({
-                placeHolder: "Enter modified code or instructions...",
-                value: code,
-                prompt: `Customize the proposed changes for ${targetFile}`,
-            });
-
-            if (customizeChoice && customizeChoice.trim()) {
-                const storage = this.context.globalStorageUri.fsPath;
-                const id = randomUUID();
-                const oldPreview = path.join(storage, `${id}.old`);
-                const newPreview = path.join(storage, `${id}.new`);
-
-                await fs.writeFile(oldPreview, oldContent, "utf8");
-                await fs.writeFile(newPreview, customizeChoice, "utf8");
-
-                await vscode.commands.executeCommand(
-                    "vscode.diff",
-                    vscode.Uri.file(oldPreview),
-                    vscode.Uri.file(newPreview),
-                    `Customized changes: ${targetFile}`
-                );
-
-                const customizedChoice2 = await vscode.window.showWarningMessage(
-                    `Apply customized changes for ${targetFile}?`,
-                    { modal: true },
-                    "Apply",
-                    "Reject"
-                );
-
-                if (customizedChoice2 === "Apply") {
-                    await fs.mkdir(parent, { recursive: true });
-                    await fs.writeFile(target, customizeChoice, "utf8");
-
-                    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
-                    await vscode.window.showTextDocument(document, {
-                        preview: false,
-                    });
-
-                    this.send(view, "Progress", `Customized changes saved to ${targetFile}.`);
-                }
+            if (choice === "Reject change" || choice === undefined) {
+                this.send(view, "System", `Changes to ${targetFile} were rejected. No file was modified.`);
+                return `Changes to ${targetFile} were rejected. No file was modified.`;
             }
-        } else {
-            this.send(view, "System", `Changes to ${targetFile} were rejected. No file was modified.`);
+
+            this.send(view, "System", `Changes to ${targetFile} were cancelled. No file was modified.`);
+            return `Changes to ${targetFile} were cancelled. No file was modified.`;
+        } finally {
+            // Clean up temporary preview files (the diff view retains its own copy)
+            await fs.rm(oldPreview, { force: true }).catch(() => {});
+            await fs.rm(newPreview, { force: true }).catch(() => {});
         }
+    }
+
+    private async applyCodeChange(
+        view: vscode.WebviewView,
+        target: string,
+        targetFile: string,
+        oldContent: string,
+        code: string
+    ): Promise<string> {
+        // Check for conflicts
+        let latestContent = "";
+        let latestExists = false;
+
+        try {
+            const stat = await fs.stat(target);
+
+            if (!stat.isFile()) {
+                throw new Error("The target is not a regular file.");
+            }
+
+            latestContent = await fs.readFile(target, "utf8");
+            latestExists = true;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                throw error;
+            }
+        }
+
+        if (latestExists && latestContent !== oldContent) {
+            const conflictChoice = await vscode.window.showWarningMessage(
+                `The file ${targetFile} has been modified since generation started. Apply changes anyway?`,
+                { modal: true },
+                "Apply anyway",
+                "Cancel"
+            );
+
+            if (conflictChoice !== "Apply anyway") {
+                this.send(view, "System", `Changes to ${targetFile} were rejected due to conflict.`);
+                return `Changes to ${targetFile} were rejected due to conflict.`;
+            }
+        }
+
+        // Apply the changes
+        const parent = path.dirname(target);
+        await fs.mkdir(parent, { recursive: true });
+        await fs.writeFile(target, code, "utf8");
+
+        // Open the file in VS Code
+        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
+        await vscode.window.showTextDocument(document, {
+            preview: false,
+        });
+
+        this.send(view, "Progress", `Saved ${targetFile}. The file was opened in VS Code.`);
+        return `Saved ${targetFile}. The file was opened in VS Code.`;
     }
 
     private async handleNewFileCreation(
         view: vscode.WebviewView,
         params: { targetFile: string; code: string; description: string }
-    ): Promise<void> {
+    ): Promise<string> {
+        if (!params?.targetFile || typeof params.code !== "string") {
+            return "create_new_file requires 'targetFile' and 'code'.";
+        }
+
+        const target = await this.resolveWorkspacePath(params.targetFile, true);
+
         // Check if file already exists
         try {
-            await fs.stat(params.targetFile);
-            this.send(view, "Error", `File ${params.targetFile} already exists.`);
-            return;
-        } catch {
-            // File doesn't exist - proceed
+            const stat = await fs.stat(target);
+            if (stat.isFile()) {
+                this.send(view, "Error", `File ${params.targetFile} already exists.`);
+                return `File ${params.targetFile} already exists.`;
+            }
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                throw error;
+            }
         }
 
         // Show approval message
@@ -582,71 +615,47 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
             "Reject"
         );
 
-        if (choice === "Create") {
-            const parent = path.dirname(params.targetFile);
-            await fs.mkdir(parent, { recursive: true });
-            await fs.writeFile(params.targetFile, params.code, "utf8");
-
-            const document = await vscode.workspace.openTextDocument(vscode.Uri.file(params.targetFile));
-            await vscode.window.showTextDocument(document, {
-                preview: false,
-            });
-
-            this.send(view, "Progress", `Created ${params.targetFile}. The file was opened in VS Code.`);
-        } else {
+        if (choice !== "Create") {
             this.send(view, "System", `File creation for ${params.targetFile} was rejected.`);
+            return `File creation for ${params.targetFile} was rejected.`;
         }
+
+        const parent = path.dirname(target);
+        await fs.mkdir(parent, { recursive: true });
+        await fs.writeFile(target, params.code, "utf8");
+
+        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
+        await vscode.window.showTextDocument(document, {
+            preview: false,
+        });
+
+        this.send(view, "Progress", `Created ${params.targetFile}. The file was opened in VS Code.`);
+        return `Created ${params.targetFile}. The file was opened in VS Code.`;
     }
 
     private async handleExplainCode(
         view: vscode.WebviewView,
         params: { filePath: string; focusRange?: string }
-    ): Promise<void> {
-        const content = await this.readFile({ path: params.filePath } as any);
-
-        view.webview.postMessage({
-            command: "generateCode",
-            params: {
-                targetFile: params.filePath,
-                operation: "edit",
-                code: content,
-                description: `Explain this code and provide insights. Focus area: ${params.focusRange || "the entire file"}`,
-            },
-        });
+    ): Promise<string> {
+        const content = await this.readFile({ path: params.filePath });
+        return `Ask the AI to explain ${params.filePath} (${content.length} characters). Focus: ${params.focusRange || "the entire file"}. Send this request in the sidebar chat to the agent.`;
     }
 
     private async handleRefactorCode(
         view: vscode.WebviewView,
         params: { filePath: string; instructions: string; focusRange?: string }
-    ): Promise<void> {
-        const content = await this.readFile({ path: params.filePath } as any);
-
-        view.webview.postMessage({
-            command: "generateCode",
-            params: {
-                targetFile: params.filePath,
-                operation: "edit",
-                code: "",
-                description: `Refactor this code: ${params.instructions}. ${params.focusRange ? `Focus: ${params.focusRange}` : ""}`,
-            },
-        });
+    ): Promise<string> {
+        const content = await this.readFile({ path: params.filePath });
+        return `Ask the AI to refactor ${params.filePath} (${content.length} characters): ${params.instructions}. Send this request in the sidebar chat to the agent.`;
     }
 
     private async handleFixError(
         view: vscode.WebviewView,
         params: { filePath: string; errorDescription: string; currentCode?: string }
-    ): Promise<void> {
-        const content = await this.readFile({ path: params.filePath } as any);
-
-        view.webview.postMessage({
-            command: "generateCode",
-            params: {
-                targetFile: params.filePath,
-                operation: "edit",
-                code: "",
-                description: `Fix this error: ${params.errorDescription}. Current code: ${params.currentCode || content.substring(0, 500)}`,
-            },
-        });
+    ): Promise<string> {
+        const content = await this.readFile({ path: params.filePath });
+        const currentCode = params.currentCode || content.substring(0, 500);
+        return `Ask the AI to fix ${params.filePath} (${content.length} characters): ${params.errorDescription}. Send this request in the sidebar chat to the agent. Current code: ${currentCode}`;
     }
 
     private async selectTextInEditor(
@@ -654,7 +663,7 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
         filePath: string,
         text: string
     ): Promise<void> {
-        const fullPath = this.resolveWorkspacePath(filePath, true);
+        const fullPath = await this.resolveWorkspacePath(filePath, true);
 
         try {
             const document = await vscode.workspace.openTextDocument(vscode.Uri.file(fullPath));
@@ -692,41 +701,545 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
         this.send(view, "Progress", "Changes rejected. No modifications were made.");
     }
 
+    // --- Tool implementations --------------------------------------------------
+
+    private async listFiles(args: { path?: string }): Promise<string> {
+        const relPath = typeof args?.path === "string" ? args.path.trim() : "";
+        const root = this.getWorkspaceRoot();
+        const targetDir = relPath ? await this.resolveWorkspacePath(relPath, true) : root;
+
+        let stat;
+        try {
+            stat = await fs.stat(targetDir);
+        } catch {
+            throw new Error(`Directory does not exist: ${relPath || "."}`);
+        }
+        if (!stat.isDirectory()) {
+            throw new Error(`Not a directory: ${relPath || "."}`);
+        }
+
+        const files: string[] = [];
+        const MAX_FILES = 100;
+
+        async function scan(directory: string): Promise<void> {
+            if (files.length >= MAX_FILES) return;
+
+            let entries;
+            try {
+                entries = await fs.readdir(directory, { withFileTypes: true });
+            } catch {
+                return;
+            }
+
+            for (const entry of entries) {
+                if (files.length >= MAX_FILES) break;
+
+                if (IGNORED_DIRECTORIES.has(entry.name)) continue;
+                if (entry.isSymbolicLink()) continue;
+
+                if (
+                    SECRET_NAMES.has(entry.name.toLowerCase()) ||
+                    entry.name.toLowerCase().startsWith(".env")
+                ) {
+                    continue;
+                }
+
+                const fullPath = path.join(directory, entry.name);
+                const relative = path.relative(root, fullPath).replace(/\\/g, "/");
+
+                if (entry.isDirectory()) {
+                    files.push(`${relative}/`);
+                    await scan(fullPath);
+                } else if (entry.isFile()) {
+                    files.push(relative);
+                }
+            }
+        }
+
+        await scan(targetDir);
+
+        if (files.length === 0) {
+            return `No files found under ${relPath || "."}.`;
+        }
+
+        return files.join("\n");
+    }
+
+    private async readFile(args: { path?: string }): Promise<string> {
+        const relPath = typeof args?.path === "string" ? args.path.trim() : "";
+        if (!relPath) {
+            throw new Error("read_file requires a 'path' argument.");
+        }
+
+        const target = await this.resolveWorkspacePath(relPath, false);
+        const stat = await fs.stat(target);
+
+        if (!stat.isFile()) {
+            throw new Error(`Not a file: ${relPath}`);
+        }
+
+        if (stat.size > MAX_FILE_SIZE) {
+            throw new Error(`File is too large to read (${stat.size} bytes): ${relPath}`);
+        }
+
+        return await fs.readFile(target, "utf8");
+    }
+
+    private async writeFile(
+        view: vscode.WebviewView,
+        args: { path?: string; content?: string }
+    ): Promise<string> {
+        const relPath = typeof args?.path === "string" ? args.path.trim() : "";
+        if (!relPath) {
+            throw new Error("write_file requires a 'path' argument.");
+        }
+
+        const content = typeof args?.content === "string" ? args.content : "";
+
+        let exists = false;
+        try {
+            const stat = await fs.stat(await this.resolveWorkspacePath(relPath, true));
+            exists = stat.isFile();
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                throw error;
+            }
+        }
+
+        return await this.handleCodeGeneration(
+            view,
+            relPath,
+            exists ? "edit" : "create",
+            content,
+            `${exists ? "Update" : "Create"} ${relPath}`
+        );
+    }
+
+    private async runCommand(
+        view: vscode.WebviewView,
+        args: { command?: string }
+    ): Promise<string> {
+        const command = typeof args?.command === "string" ? args.command.trim() : "";
+        if (!command) {
+            throw new Error("run_command requires a 'command' argument.");
+        }
+
+        const workspaceRoot = this.getWorkspaceRoot();
+
+        const choice = await vscode.window.showWarningMessage(
+            `Execute this command in the workspace?\n\n${command}`,
+            { modal: true },
+            "Run",
+            "Cancel"
+        );
+
+        if (choice !== "Run") {
+            return "Command rejected by the user.";
+        }
+
+        try {
+            const { stdout, stderr } = await execAsync(command, {
+                cwd: workspaceRoot,
+                timeout: 120_000,
+                maxBuffer: 1024 * 1024,
+                windowsHide: true,
+            });
+
+            const output = [
+                stdout?.trim(),
+                stderr?.trim() ? `stderr: ${stderr.trim()}` : "",
+            ]
+                .filter(Boolean)
+                .join("\n")
+                .slice(0, 8000);
+
+            return output || "(no output)";
+        } catch (error) {
+            const err = error as { stdout?: string; stderr?: string; message?: string };
+            const output = [
+                err.stdout?.trim(),
+                err.stderr?.trim() ? `stderr: ${err.stderr.trim()}` : "",
+                err.message ? `Error: ${err.message}` : "",
+            ]
+                .filter(Boolean)
+                .join("\n")
+                .slice(0, 8000);
+
+            return output || "Command failed with no details.";
+        }
+    }
+
+    // --- Live staging preview (unsaved, in-memory editor tab) ----------------
+
+    private previewDoc: vscode.TextDocument | undefined;
+    private previewEditor: vscode.TextEditor | undefined;
+    private previewContent = "";
+
+    private resetPreview(): void {
+        this.previewDoc = undefined;
+        this.previewEditor = undefined;
+        this.previewContent = "";
+    }
+
+    private languageForFile(fileHint: string): string {
+        const ext = path.extname(fileHint || "").toLowerCase();
+        const map: Record<string, string> = {
+            ".ts": "typescript",
+            ".tsx": "typescriptreact",
+            ".js": "javascript",
+            ".jsx": "javascriptreact",
+            ".mjs": "javascript",
+            ".cjs": "javascript",
+            ".py": "python",
+            ".json": "json",
+            ".md": "markdown",
+            ".css": "css",
+            ".scss": "scss",
+            ".html": "html",
+            ".xml": "xml",
+            ".rs": "rust",
+            ".go": "go",
+            ".java": "java",
+            ".c": "c",
+            ".h": "c",
+            ".cpp": "cpp",
+            ".cs": "csharp",
+            ".sh": "shellscript",
+            ".yml": "yaml",
+            ".yaml": "yaml",
+            ".sql": "sql",
+        };
+        return map[ext] ?? "plaintext";
+    }
+
+    private async ensurePreviewEditor(fileHint: string): Promise<void> {
+        if (this.previewDoc && this.previewEditor) {
+            return;
+        }
+
+        this.previewDoc = await vscode.workspace.openTextDocument({
+            language: this.languageForFile(fileHint),
+            content: "",
+        });
+        this.previewEditor = await vscode.window.showTextDocument(this.previewDoc, {
+            preview: true,
+        });
+    }
+
+    private async updatePreviewEditor(content: string): Promise<void> {
+        if (!this.previewDoc || !this.previewEditor) {
+            return;
+        }
+
+        const doc = this.previewDoc;
+        this.previewContent = content;
+
+        try {
+            await this.previewEditor.edit(editBuilder => {
+                const range = new vscode.Range(
+                    0,
+                    0,
+                    doc.lineCount - 1,
+                    doc.lineAt(doc.lineCount - 1).text.length
+                );
+                editBuilder.replace(range, content);
+            });
+        } catch {
+            // Editor may have been closed by the user — preview is best-effort.
+        }
+    }
+
+    // --- SSE / streaming ------------------------------------------------------
+
+    private extractPartialJsonString(acc: string, key: string): string | null {
+        const keyIdx = acc.indexOf(`"${key}"`);
+        if (keyIdx < 0) {
+            return null;
+        }
+
+        const colonIdx = acc.indexOf(":", keyIdx + key.length + 2);
+        if (colonIdx < 0) {
+            return null;
+        }
+
+        const quoteIdx = acc.indexOf('"', colonIdx + 1);
+        if (quoteIdx < 0) {
+            return null;
+        }
+
+        let raw = acc.slice(quoteIdx + 1);
+
+        // A trailing lone backslash is an incomplete escape — drop it; it will
+        // arrive with the next chunk.
+        if (raw.endsWith("\\")) {
+            raw = raw.slice(0, -1);
+        }
+
+        let out = "";
+        for (let i = 0; i < raw.length; i++) {
+            const c = raw[i];
+
+            if (c === "\\") {
+                const next = raw[i + 1];
+                if (next === undefined) {
+                    out += "\\";
+                    return out;
+                }
+                if (next === "n") { out += "\n"; i++; }
+                else if (next === "t") { out += "\t"; i++; }
+                else if (next === "r") { out += "\r"; i++; }
+                else if (next === "b") { out += "\b"; i++; }
+                else if (next === "f") { out += "\f"; i++; }
+                else if (next === '"') { out += '"'; i++; }
+                else if (next === "\\") { out += "\\"; i++; }
+                else if (next === "/") { out += "/"; i++; }
+                else if (next === "u") {
+                    const hex = raw.slice(i + 2, i + 6);
+                    if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+                        out += String.fromCharCode(parseInt(hex, 16));
+                        i += 5;
+                    } else {
+                        out += "\\u";
+                        i++;
+                    }
+                } else {
+                    out += "\\" + next;
+                    i++;
+                }
+            } else {
+                out += c;
+            }
+        }
+
+        return out;
+    }
+
+    private parseSseBlock(block: string): Array<{ name: string; data: string }> {
+        const events: Array<{ name: string; data: string }> = [];
+        const lines = block.split(/\r?\n/);
+        let current: { name: string; dataLines: string[] } | null = null;
+
+        const flush = (): void => {
+            if (current && current.dataLines.length > 0) {
+                events.push({ name: current.name, data: current.dataLines.join("\n") });
+            }
+            current = null;
+        };
+
+        for (const rawLine of lines) {
+            const line = rawLine;
+
+            if (line.startsWith("event:")) {
+                // Each "event:" line kicks off a new event group.
+                flush();
+                current = { name: line.slice(6).trim() || "message", dataLines: [] };
+            } else if (line.startsWith("data:")) {
+                if (!current) {
+                    current = { name: "message", dataLines: [] };
+                }
+                current.dataLines.push(line.slice(5).trimStart());
+            }
+        }
+
+        flush();
+        return events;
+    }
+
+    private async readSSE(
+        view: vscode.WebviewView,
+        response: Response,
+        toolCalls: AgentToolCall[]
+    ): Promise<{ prose: string; cancelled: boolean }> {
+        const reader = response.body?.getReader();
+        if (!reader) {
+            throw new Error("The API response body is not readable.");
+        }
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let prose = "";
+        let previewStreamIdx = -1;
+        const toolAcc = new Map<number, { id: string; name: string; arguments: string }>();
+        let cancelled = false;
+
+        const post = (message: Record<string, unknown>): void => {
+            view.webview.postMessage(message);
+        };
+
+        const handleEvent = async (name: string, dataStr: string): Promise<void> => {
+            let data: any = null;
+            try {
+                data = JSON.parse(dataStr);
+            } catch {
+                data = null;
+            }
+
+            if (name === "delta" && data && typeof data.content === "string" && data.content) {
+                prose += data.content;
+                post({ command: "assistantDelta", text: data.content });
+                return;
+            }
+
+            if (name === "file_change" && data && typeof data.current_file === "string") {
+                post({ command: "fileChange", filePath: data.current_file });
+                return;
+            }
+
+            if (name === "tool_call_delta" && data) {
+                const idx = typeof data.index === "number" ? data.index : 0;
+                const rawName = typeof data.name === "string" ? data.name : "";
+
+                if (rawName !== "write_file") {
+                    return;
+                }
+
+                if (previewStreamIdx !== idx) {
+                    previewStreamIdx = idx;
+                    this.resetPreview();
+                }
+
+                const acc = toolAcc.get(idx) ?? { id: "", name: rawName, arguments: "" };
+                acc.id = typeof data.id === "string" && data.id ? data.id : acc.id;
+                acc.name = rawName;
+                acc.arguments += typeof data.arguments_delta === "string" ? data.arguments_delta : "";
+                toolAcc.set(idx, acc);
+
+                const pathHint = this.extractPartialJsonString(acc.arguments, "path");
+                if (pathHint) {
+                    if (!this.previewDoc) {
+                        await this.ensurePreviewEditor(pathHint);
+                    }
+                    post({ command: "fileChange", filePath: pathHint });
+                }
+
+                const content = this.extractPartialJsonString(acc.arguments, "content");
+                if (content) {
+                    await this.ensurePreviewEditor(pathHint || "preview");
+                    await this.updatePreviewEditor(content);
+                }
+                return;
+            }
+
+            if (name === "tool_call" && data) {
+                const tId = typeof data.id === "string" ? data.id : "";
+                const tName = typeof data.name === "string" ? data.name : "";
+                const tArgs =
+                    data.arguments && typeof data.arguments === "object" && !Array.isArray(data.arguments)
+                        ? (data.arguments as Record<string, unknown>)
+                        : {};
+
+                if (tId && tName) {
+                    toolCalls.push({ id: tId, name: tName, arguments: tArgs });
+                }
+
+                if (tName === "write_file") {
+                    const filePath = typeof tArgs.path === "string" ? tArgs.path : "file";
+                    post({ command: "toolProgress", name: "write_file", filePath });
+                }
+                return;
+            }
+
+            if (name === "done" && data) {
+                return;
+            }
+
+            if (name === "error" && data && typeof data.message === "string") {
+                throw new Error(data.message);
+            }
+
+            if (name === "cancelled") {
+                cancelled = true;
+                return;
+            }
+        };
+
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+
+                buffer += decoder.decode(value, { stream: true });
+
+                let idx;
+                while ((idx = buffer.indexOf("\n\n")) !== -1) {
+                    const block = buffer.slice(0, idx);
+                    buffer = buffer.slice(idx + 2);
+
+                    for (const event of this.parseSseBlock(block)) {
+                        await handleEvent(event.name, event.data);
+                        if (cancelled) {
+                            return { prose, cancelled: true };
+                        }
+                    }
+                }
+            }
+
+            // Flush any trailing buffered block
+            if (buffer.trim()) {
+                for (const event of this.parseSseBlock(buffer)) {
+                    await handleEvent(event.name, event.data);
+                    if (cancelled) {
+                        return { prose, cancelled: true };
+                    }
+                }
+            }
+        } finally {
+            try {
+                reader.cancel();
+            } catch {
+                // Ignore cleanup errors.
+            }
+        }
+
+        return { prose, cancelled };
+    }
+
     private async executeTool(view: vscode.WebviewView, tool: AgentToolCall): Promise<string> {
         switch (tool.name) {
             case "list_files":
-                return this.listFiles(tool.arguments);
+                return await this.listFiles(tool.arguments as { path?: string });
 
             case "read_file":
-                return this.readFile(tool.arguments);
+                return await this.readFile(tool.arguments as { path?: string });
 
             case "write_file":
-                return this.writeFile(view, tool.arguments);
+                return await this.writeFile(view, tool.arguments as { path?: string; content?: string });
 
             case "run_command":
-                return this.runCommand(view, tool.arguments);
+                return await this.runCommand(view, tool.arguments as { command?: string });
 
-            case "generate_code":
-                const { targetFile, operation, code, description } = tool.arguments;
+            case "generate_code": {
+                const args = tool.arguments as {
+                    targetFile?: string;
+                    operation?: "create" | "edit" | "append" | "replace";
+                    code?: string;
+                    description?: string;
+                };
+                if (!args.targetFile || typeof args.code !== "string") {
+                    return "The generate_code tool requires 'targetFile' and 'code' arguments.";
+                }
                 return await this.handleCodeGeneration(
                     view,
-                    targetFile,
-                    operation,
-                    code,
-                    description
+                    args.targetFile,
+                    args.operation ?? "edit",
+                    args.code,
+                    args.description ?? ""
                 );
+            }
 
             case "create_new_file":
-                return await this.handleNewFileCreation(view, tool.arguments);
+                return await this.handleNewFileCreation(view, tool.arguments as { targetFile: string; code: string; description: string });
 
             case "explain_code":
-                return await this.handleExplainCode(view, tool.arguments);
+                return await this.handleExplainCode(view, tool.arguments as { filePath: string; focusRange?: string });
 
             case "refactor_code":
-                return await this.handleRefactorCode(view, tool.arguments);
+                return await this.handleRefactorCode(view, tool.arguments as { filePath: string; instructions: string; focusRange?: string });
 
             case "fix_error":
-                return await this.handleFixError(view, tool.arguments);
+                return await this.handleFixError(view, tool.arguments as { filePath: string; errorDescription: string; currentCode?: string });
 
             default:
                 return `Unknown tool: ${tool.name}`;
@@ -1036,7 +1549,7 @@ content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonc
     <h3>Instructions</h3>
     <p>Enter your coding task below. The AI will generate code that appears directly in your editor.</p>
 
-    <div class="command-input" id="input" placeholder="Describe what you want to build or change..."></div>
+    <textarea id="input" class="command-input" placeholder="Describe what you want to build or change..." rows="3"></textarea>
 
     <div style="margin-top: 12px;">
         <button class="action-button" id="send">Send</button>
@@ -1067,43 +1580,25 @@ content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonc
     </div>
 </div>
 
-<div id="codePreview" style="display: none; margin: 16px 0;">
-    <h3>Code Preview</h3>
-    <p>Proposed code will appear here for review before approval.</p>
-    <div class="file-preview" id="previewContent"></div>
-    <div style="margin-top: 8px;">
-        <button class="action-button" id="approveBtn">Approve and Apply</button>
-        <button class="action-button secondary" id="rejectBtn">Reject</button>
-    </div>
-</div>
-
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
 
 const state = {
     busy: false,
-    pendingChanges: null,
-    currentFile: null,
-    generationId: null
+    liveAssistant: null
 };
 
 const input = document.getElementById('input');
 const send = document.getElementById('send');
 const stop = document.getElementById('stop');
-const panel = document.getElementById('panel');
-const sidebar = document.getElementById('sidebar');
 const sidebarContent = document.getElementById('sidebarContent');
 const progress = document.getElementById('progress');
 const progressFill = document.getElementById('progressFill');
 const progressText = document.getElementById('progressText');
 const activityLog = document.getElementById('activityLog');
-const codePreview = document.getElementById('codePreview');
-const previewContent = document.getElementById('previewContent');
-const approveBtn = document.getElementById('approveBtn');
-const rejectBtn = document.getElementById('rejectBtn');
 
 function scrollToBottom() {
-    const containers = [sidebarContent, activityLog, previewContent];
+    const containers = [sidebarContent, activityLog];
     for (const container of containers) {
         if (container) {
             container.scrollTop = container.scrollHeight;
@@ -1119,6 +1614,34 @@ function addSidebarLine(text, className) {
     scrollToBottom();
 }
 
+function ensureLiveAssistant() {
+    if (!state.liveAssistant) {
+        state.liveAssistant = document.createElement('div');
+        state.liveAssistant.className = 'instruction-item assistant';
+        state.liveAssistant.textContent = 'ManuCodeAI: ';
+        sidebarContent.insertBefore(state.liveAssistant, sidebarContent.firstChild);
+    }
+    return state.liveAssistant;
+}
+
+function appendLiveAssistant(text) {
+    const el = ensureLiveAssistant();
+    el.textContent += text;
+    scrollToBottom();
+}
+
+function finishLiveAssistant() {
+    state.liveAssistant = null;
+}
+
+function addActivityLine(text) {
+    const div = document.createElement('div');
+    div.className = 'dimmed';
+    div.textContent = text;
+    activityLog.insertBefore(div, activityLog.firstChild);
+    scrollToBottom();
+}
+
 function setBusy(busy) {
     state.busy = busy;
     send.disabled = busy;
@@ -1130,36 +1653,6 @@ function setBusy(busy) {
 function setProgress(percent) {
     progressFill.style.width = percent + '%';
     progressText.textContent = Math.round(percent) + '%';
-}
-
-function showCodePreview(code, filePath, operation) {
-    codePreview.style.display = 'block';
-    previewContent.textContent = 'File: ' + filePath + '\nOperation: ' + operation + '\n\n' + code;
-    state.pendingChanges = { filePath, code, operation };
-    approveBtn.onclick = () => applyChanges();
-    rejectBtn.onclick = () => rejectChanges();
-}
-
-function hideCodePreview() {
-    codePreview.style.display = 'none';
-    previewContent.textContent = '';
-    state.pendingChanges = null;
-}
-
-function applyChanges() {
-    if (!state.pendingChanges) return;
-    vscode.postMessage({
-        command: 'acceptChanges',
-        accept: true
-    });
-    hideCodePreview();
-}
-
-function rejectChanges() {
-    vscode.postMessage({
-        command: 'rejectChanges'
-    });
-    hideCodePreview();
 }
 
 function sendMessage() {
@@ -1195,22 +1688,23 @@ window.addEventListener('message', event => {
     const data = event.data || {};
 
     if (data.command === 'response') {
+        finishLiveAssistant();
         addSidebarLine('ManuCodeAI: ' + data.text, 'assistant');
         setBusy(false);
     }
 
-    if (data.command === 'delta') {
-        if (state.pendingChanges) {
-            previewContent.textContent += data.text;
-        }
+    if (data.command === 'assistantDelta') {
+        appendLiveAssistant(data.text);
     }
 
     if (data.command === 'assistantStart') {
+        finishLiveAssistant();
         setBusy(true);
-        addSidebarLine('ManuCodeAI is thinking...', 'dimmed');
+        addActivityLine('ManuCodeAI is starting work...');
     }
 
     if (data.command === 'assistantEnd') {
+        finishLiveAssistant();
         setBusy(false);
         addSidebarLine('ManuCodeAI finished.', 'dimmed');
     }
@@ -1223,6 +1717,16 @@ window.addEventListener('message', event => {
         send.disabled = false;
         stop.disabled = true;
         send.textContent = 'Send';
+        setBusy(false);
+    }
+
+    if (data.command === 'fileChange') {
+        addActivityLine('Writing: ' + data.filePath);
+    }
+
+    if (data.command === 'toolProgress') {
+        setProgress(30);
+        addActivityLine('Working: ' + (data.name || 'tool') + (data.filePath ? ' → ' + data.filePath : ''));
     }
 
     if (data.command === 'activeEditorInfo') {
@@ -1232,17 +1736,35 @@ window.addEventListener('message', event => {
         }
     }
 
-    if (data.command === 'toolProgress') {
-        setProgress(30);
-        addSidebarLine('Working: ' + (data.name || 'tool'), 'dimmed');
-    }
-
     if (data.command === 'clear') {
         sidebarContent.replaceChildren();
+        activityLog.replaceChildren();
         addSidebarLine('Starting new conversation...', '');
+        addActivityLine('No activity yet.');
+        state.liveAssistant = null;
     }
 });
 </script>
 
 </body>
 </html>`
+    }
+}
+
+export function activate(context: vscode.ExtensionContext): void {
+    const provider = new ManuCodeAIProvider(context);
+
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(
+            "manucodeai.chat",
+            provider,
+            { webviewOptions: { retainContextWhenHidden: true } }
+        ),
+        vscode.commands.registerCommand("manucodeai.newChat", () => provider.newChat()),
+        { dispose: () => provider.dispose() }
+    );
+}
+
+export function deactivate(): void {
+    // Disposables in context.subscriptions are cleaned up automatically.
+}
