@@ -7,26 +7,27 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings, QThread, Signal
 from PySide6.QtWidgets import (
-    QApplication,
-    QFileDialog,
-    QFormLayout,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
-    QPlainTextEdit,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
+    QApplication, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+    QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
+    QVBoxLayout, QWidget,
 )
 
-from .agent import CodingAgent
+from .agent import CodingAgent, discover_models
 from .vscode import VSCodeController
 
 
 APP_ORG = "ManuCodeAI"
 APP_NAME = "ManuCodeAI Desktop"
+PROVIDERS = {
+    "AgentRouter": {
+        "base_url": "https://agentrouter.org/v1",
+        "protocol": "openai",
+    },
+    "Coarena": {
+        "base_url": "https://coarena.ai/api",
+        "protocol": "anthropic",
+    },
+}
 
 
 class AgentWorker(QThread):
@@ -36,8 +37,10 @@ class AgentWorker(QThread):
     completed = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, api_key: str, base_url: str, model: str, workspace: Path, prompt: str):
+    def __init__(self, provider: str, api_key: str, base_url: str, model: str,
+                 workspace: Path, prompt: str):
         super().__init__()
+        self.provider = provider
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
@@ -60,6 +63,7 @@ class AgentWorker(QThread):
             vscode = VSCodeController()
             vscode.open_workspace(self.workspace)
             agent = CodingAgent(
+                provider=self.provider,
                 api_key=self.api_key,
                 base_url=self.base_url,
                 model=self.model,
@@ -69,8 +73,7 @@ class AgentWorker(QThread):
                 status=self.status.emit,
                 cancel_event=self.cancel_event,
             )
-            result = agent.run(self.prompt)
-            self.completed.emit(result)
+            self.completed.emit(agent.run(self.prompt))
         except Exception as error:
             self.failed.emit(str(error))
 
@@ -86,17 +89,24 @@ class MainWindow(QMainWindow):
         self.resize(980, 720)
         self.setMinimumSize(760, 560)
 
-        self.base_url = QLineEdit(self.settings.value("base_url", "https://api.openai.com/v1"))
-        self.model = QLineEdit(self.settings.value("model", "gpt-4o-mini"))
+        self.provider = QComboBox()
+        self.provider.addItems(PROVIDERS.keys())
+        saved_provider = self.settings.value("provider", "AgentRouter")
+        self.provider.setCurrentText(saved_provider if saved_provider in PROVIDERS else "AgentRouter")
+
+        provider_config = PROVIDERS[self.provider.currentText()]
+        self.base_url = QLineEdit(self.settings.value("base_url", provider_config["base_url"]))
+        self.model = QComboBox()
+        self.model.setEditable(True)
+        self.model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.model.setCurrentText(self.settings.value("model", ""))
         self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key.setPlaceholderText("Paste your provider API key")
         self.project_label = QLabel("No project folder selected")
         self.project_label.setWordWrap(True)
         self.prompt = QPlainTextEdit()
-        self.prompt.setPlaceholderText(
-            "Describe what you want ManuCodeAI to build, change, or fix..."
-        )
+        self.prompt.setPlaceholderText("Describe what you want ManuCodeAI to build, change, or fix...")
         self.prompt.setMinimumHeight(150)
         self.activity = QPlainTextEdit()
         self.activity.setReadOnly(True)
@@ -104,6 +114,8 @@ class MainWindow(QMainWindow):
 
         choose_button = QPushButton("Open project folder")
         choose_button.clicked.connect(self.choose_project)
+        self.fetch_models_button = QPushButton("Fetch models")
+        self.fetch_models_button.clicked.connect(self.fetch_models)
         self.start_button = QPushButton("Start coding")
         self.start_button.clicked.connect(self.start_coding)
         self.stop_button = QPushButton("Stop")
@@ -111,14 +123,17 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self.stop_coding)
 
         form = QFormLayout()
-        form.addRow("AI provider base URL", self.base_url)
-        form.addRow("Model", self.model)
+        form.addRow("AI provider", self.provider)
+        form.addRow("API base URL", self.base_url)
+        model_row = QHBoxLayout()
+        model_row.addWidget(self.model, 1)
+        model_row.addWidget(self.fetch_models_button)
+        form.addRow("Model", model_row)
         form.addRow("API key", self.api_key)
 
         project_row = QHBoxLayout()
         project_row.addWidget(choose_button)
         project_row.addWidget(self.project_label, 1)
-
         actions = QHBoxLayout()
         actions.addStretch(1)
         actions.addWidget(self.stop_button)
@@ -137,13 +152,14 @@ class MainWindow(QMainWindow):
         container = QWidget()
         container.setLayout(root)
         self.setCentralWidget(container)
+        self.provider.currentTextChanged.connect(self._provider_changed)
         self._load_saved_key()
         self._apply_theme()
 
     def _apply_theme(self) -> None:
         self.setStyleSheet("""
             QMainWindow, QWidget { background: #101114; color: #e8e8ea; }
-            QLineEdit, QPlainTextEdit {
+            QLineEdit, QComboBox, QPlainTextEdit {
                 background: #191b20; color: #f2f2f3; border: 1px solid #343740;
                 border-radius: 7px; padding: 9px; selection-background-color: #8c6b32;
             }
@@ -155,21 +171,37 @@ class MainWindow(QMainWindow):
             QLabel { color: #e5e5e7; padding: 3px; }
         """)
 
+    def _keyring_name(self, provider: str | None = None) -> str:
+        return f"{(provider or self.provider.currentText()).lower()}-api-key"
+
     def _load_saved_key(self) -> None:
         try:
             import keyring
-            saved = keyring.get_password(APP_ORG, "provider-api-key")
+            saved = keyring.get_password(APP_ORG, self._keyring_name())
             if saved:
                 self.api_key.setText(saved)
         except Exception:
             self._log("Secure credential storage is unavailable; the API key will not be restored.")
 
-    def _save_settings(self) -> None:
-        self.settings.setValue("base_url", self.base_url.text().strip())
-        self.settings.setValue("model", self.model.text().strip())
+    def _provider_changed(self, provider: str) -> None:
         try:
             import keyring
-            keyring.set_password(APP_ORG, "provider-api-key", self.api_key.text().strip())
+            keyring.set_password(APP_ORG, self._keyring_name(), self.api_key.text().strip())
+            saved = keyring.get_password(APP_ORG, self._keyring_name(provider))
+        except Exception:
+            saved = None
+        self.api_key.setText(saved or "")
+        self.base_url.setText(PROVIDERS[provider]["base_url"])
+        self.model.clear()
+        self.model.setCurrentText("")
+
+    def _save_settings(self) -> None:
+        self.settings.setValue("provider", self.provider.currentText())
+        self.settings.setValue("base_url", self.base_url.text().strip())
+        self.settings.setValue("model", self.model.currentText().strip())
+        try:
+            import keyring
+            keyring.set_password(APP_ORG, self._keyring_name(), self.api_key.text().strip())
         except Exception as error:
             self._log(f"Could not save API key to Windows Credential Manager: {error}")
 
@@ -183,17 +215,48 @@ class MainWindow(QMainWindow):
             self.project_label.setText(str(self.workspace))
             self._log(f"Project selected: {self.workspace}")
 
+    def fetch_models(self) -> None:
+        provider = self.provider.currentText()
+        if provider != "AgentRouter":
+            QMessageBox.information(
+                self, "Model discovery",
+                "Automatic model discovery is currently enabled for AgentRouter. "
+                "For Coarena, enter the model ID provided by your Coarena account.",
+            )
+            return
+        key = self.api_key.text().strip()
+        if not key:
+            QMessageBox.warning(self, "API key required", "Enter your AgentRouter API key first.")
+            return
+        self.fetch_models_button.setEnabled(False)
+        self._log("Fetching available AgentRouter models...")
+        try:
+            models = discover_models(key, self.base_url.text().strip())
+            current = self.model.currentText().strip()
+            self.model.clear()
+            self.model.addItems(models)
+            if current:
+                self.model.setCurrentText(current)
+            elif models:
+                self.model.setCurrentIndex(0)
+            self._log(f"Loaded {len(models)} model(s) from AgentRouter.")
+        except Exception as error:
+            QMessageBox.critical(self, "Model discovery failed", str(error))
+            self._log(f"Model discovery failed: {error}")
+        finally:
+            self.fetch_models_button.setEnabled(True)
+
     def start_coding(self) -> None:
         if self.worker and self.worker.isRunning():
             return
         api_key = self.api_key.text().strip()
-        model = self.model.text().strip()
+        model = self.model.currentText().strip()
         instruction = self.prompt.toPlainText().strip()
         if not api_key:
             QMessageBox.warning(self, "API key required", "Enter your AI provider API key.")
             return
         if not model:
-            QMessageBox.warning(self, "Model required", "Enter a model identifier.")
+            QMessageBox.warning(self, "Model required", "Enter or select a model identifier.")
             return
         if not self.workspace or not self.workspace.is_dir():
             QMessageBox.warning(self, "Project required", "Select a valid project folder first.")
@@ -205,13 +268,10 @@ class MainWindow(QMainWindow):
         self._save_settings()
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self._log("\n--- New coding session ---")
+        self._log(f"\n--- New coding session ({self.provider.currentText()}) ---")
         self.worker = AgentWorker(
-            api_key,
-            self.base_url.text().strip(),
-            model,
-            self.workspace,
-            instruction,
+            self.provider.currentText(), api_key, self.base_url.text().strip(),
+            model, self.workspace, instruction,
         )
         self.worker.status.connect(self._log)
         self.worker.completed.connect(self._on_completed)
@@ -222,9 +282,7 @@ class MainWindow(QMainWindow):
     def _on_approval_requested(self, title: str, detail: str, payload: object) -> None:
         gate, decision = payload
         answer = QMessageBox.question(
-            self,
-            title,
-            detail,
+            self, title, detail,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
