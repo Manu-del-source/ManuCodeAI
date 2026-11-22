@@ -401,6 +401,7 @@ class CodingAgent:
         if path.suffix.lower() == ".py":
             try:
                 ast.parse(content, filename=relative)
+                self.status(f"Python preflight passed: {relative} — no syntax or indentation errors detected.")
             except SyntaxError as error:
                 location = f"line {error.lineno}" if error.lineno else "unknown line"
                 if error.offset:
@@ -418,6 +419,9 @@ class CodingAgent:
         self._check_cancelled()
         self.vscode.write_file_visibly(
             self.workspace, relative, content, cancel_event=self.cancel_event,
+            progress_callback=lambda current, total: self.status(
+                f"Typing {relative}: {current}/{total} characters"
+            ),
         )
         self._check_cancelled()
         try:
@@ -435,6 +439,7 @@ class CodingAgent:
         if path.suffix.lower() == ".py":
             try:
                 ast.parse(saved_content, filename=relative)
+                self.status(f"Python post-save check passed: {relative}.")
             except SyntaxError as error:
                 return (
                     f"Post-save Python validation failed in {relative} at line "
