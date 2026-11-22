@@ -22,10 +22,22 @@ PROVIDERS = {
     "AgentRouter": {
         "base_url": "https://agentrouter.org/v1",
         "protocol": "openai",
+        "default_model": "",
     },
     "Coarena": {
         "base_url": "https://coarena.ai/api",
         "protocol": "anthropic",
+        "default_model": "",
+    },
+    "Gemini": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "protocol": "openai",
+        "default_model": "gemini-3.8-flash",
+    },
+    "OpenRouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "protocol": "openai",
+        "default_model": "openrouter/free",
     },
 }
 
@@ -102,7 +114,12 @@ class MainWindow(QMainWindow):
         self.model = QComboBox()
         self.model.setEditable(True)
         self.model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.model.setCurrentText(self.settings.value(f"{self._active_provider}/model", ""))
+        self.model.setCurrentText(
+            self.settings.value(
+                f"{self._active_provider}/model",
+                provider_config.get("default_model", ""),
+            )
+        )
         self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key.setPlaceholderText("Paste your provider API key")
@@ -202,7 +219,12 @@ class MainWindow(QMainWindow):
             self.settings.value(f"{provider}/base_url", PROVIDERS[provider]["base_url"])
         )
         self.model.clear()
-        self.model.setCurrentText(self.settings.value(f"{provider}/model", ""))
+        self.model.setCurrentText(
+            self.settings.value(
+                f"{provider}/model",
+                PROVIDERS[provider].get("default_model", ""),
+            )
+        )
 
     def _save_settings(self) -> None:
         current_provider = self.provider.currentText()
@@ -227,11 +249,19 @@ class MainWindow(QMainWindow):
 
     def fetch_models(self) -> None:
         provider = self.provider.currentText()
-        if provider != "AgentRouter":
+        if provider == "Coarena":
             QMessageBox.information(
-                self, "Model discovery",
-                "Automatic model discovery is currently enabled for AgentRouter. "
-                "For Coarena, enter the model ID provided by your Coarena account.",
+                self, "Model selection",
+                "Coarena model discovery is not enabled. Enter a model ID supplied "
+                "by your Coarena account.",
+            )
+            return
+        if provider == "Gemini":
+            QMessageBox.information(
+                self, "Gemini model selection",
+                "Use the default gemini-3.8-flash model or enter another model ID "
+                "available to your Google AI Studio API key. Gemini model discovery "
+                "is not yet supported by this button.",
             )
             return
         key = self.api_key.text().strip()
