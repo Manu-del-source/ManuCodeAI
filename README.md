@@ -13,19 +13,34 @@ AI coding agent integrated into Visual Studio Code.
 - `src/core/` — pure, VS Code-free modules (unit-tested with `node --test`):
   - `partialArgumentsParser.ts` — incremental, escape-aware parser for partial JSON tool arguments (any key order, malformed-safe, no raw JSON fragments).
   - `previewTracker.ts` — per-file generation state (streaming → ready → cancelled / applied / rejected).
+  - `typewriter.ts` — human-like typing pace for the preview editor (queue, tiny chunks, per-file cancellation).
   - `agentStreamRunner.ts` — parses the backend SSE stream and drives the tracker.
   - `fileOps.ts` — the only workspace writers (read/write/conflict detection).
   - `approval.ts` / `language.ts` — approval decisions and path → language mapping.
-- `src/previewManager.ts` — VS Code glue: untitled documents, native tabs, append-only updates, cancellation status.
+- `src/previewManager.ts` — VS Code glue: untitled documents, native tabs, paced (human-like) reveal updates, cancellation status.
 - `src/extension.ts` — wiring: SSE consumption, approval flow, webview sidebar.
 
 ### Preview → approval pipeline
 
 1. The backend streams `tool_call_start`, `tool_call_delta` (raw argument fragments), `tool_call`, `done`.
-2. The extension opens one untitled preview tab per `write_file` (streaming, per-chunk).
-3. When the stream completes, a native diff (original vs proposed) is shown; the user approves or rejects.
+2. The extension opens one untitled preview tab per `write_file` and types the incoming characters into it at the configured human-like speed. The stream itself is consumed at full speed — only the editor rendering is paced.
+3. When the stream completes and the typing finishes, a native diff (original vs proposed) is shown; the user approves or rejects.
 4. Approved changes are written — with an external-modification conflict check — and the workspace file is opened.
 5. Rejected changes leave the workspace byte-identical; cancelled generation marks the preview incomplete and never executes writes.
+
+## Typing speed
+
+Generated code is revealed in the preview editor at a human-like pace instead of appearing in large batches. The pace applies to editor rendering only — the AI's generation and the SSE stream are never slowed down.
+
+| Setting | Characters per second |
+| --- | --- |
+| `manucodeai.typingSpeed` = `slow` | 15 |
+| `manucodeai.typingSpeed` = `normal` (default) | 35 |
+| `manucodeai.typingSpeed` = `fast` | 70 |
+
+Set it in **Settings → ManuCodeAI → Typing Speed** (`settings.json`: `"manucodeai.typingSpeed": "normal"`). Changes apply immediately, including to text already queued for an in-flight preview.
+
+Pressing **Stop** halts the visual typing immediately: queued characters are dropped, pending reveal timers are cleared, and no further editor updates are applied. Characters already shown stay in the preview for reference (the incomplete preview is never written).
 
 ## Start the Python API
 

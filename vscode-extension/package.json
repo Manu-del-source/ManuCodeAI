@@ -46,7 +46,28 @@
         "command": "manucodeai.newChat",
         "title": "ManuCodeAI: New Chat"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "ManuCodeAI",
+      "properties": {
+        "manucodeai.typingSpeed": {
+          "type": "string",
+          "enum": [
+            "slow",
+            "normal",
+            "fast"
+          ],
+          "enumDescriptions": [
+            "15 characters per second - relaxed, easy to follow.",
+            "35 characters per second - the default human-like pace.",
+            "70 characters per second - brisk."
+          ],
+          "default": "normal",
+          "scope": "window",
+          "markdownDescription": "Speed at which generated code is revealed in the preview editor. This only paces the editor rendering; AI generation is never slowed down. `slow` = 15 chars/s, `normal` = 35 chars/s, `fast` = 70 chars/s."
+        }
+      }
+    }
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
