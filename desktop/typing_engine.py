@@ -51,9 +51,14 @@ class TypingCancelled(Exception):
 class WindowsTypingEngine:
     """Types code progressively with a steady pace and small natural pauses."""
 
-    def __init__(self, min_delay: float = 0.025, max_delay: float = 0.065):
+    def __init__(self, min_delay: float = 0.075, max_delay: float = 0.14,
+                 line_delay_min: float = 0.55, line_delay_max: float = 0.95):
+        # Deliberately slow defaults: visible editor typing should be readable,
+        # not a near-instant paste disguised as keyboard input.
         self.min_delay = min_delay
         self.max_delay = max_delay
+        self.line_delay_min = line_delay_min
+        self.line_delay_max = line_delay_max
         self._random = random.Random()
 
     @staticmethod
@@ -105,19 +110,29 @@ class WindowsTypingEngine:
                     self._send_input(unit, KEYEVENTF_UNICODE)
                     self._send_input(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
 
-            if progress_callback and (index % 25 == 0 or index == total):
+            if progress_callback and (character == "\\n" or index % 25 == 0 or index == total):
                 progress_callback(index, total)
 
-            delay = self._random.uniform(self.min_delay, self.max_delay)
-            if character in ",;":
-                delay += self._random.uniform(0.08, 0.16)
-            elif character in ".!?":
-                delay += self._random.uniform(0.12, 0.24)
-            elif character == "\\n":
-                delay += self._random.uniform(0.12, 0.22)
-            elif character in "{}[]()":
-                delay += self._random.uniform(0.025, 0.07)
-            time.sleep(delay)
+            if character == "\\n":
+                # Finish the current line, pause, then begin the next line.
+                delay = self._random.uniform(self.line_delay_min, self.line_delay_max)
+            else:
+                delay = self._random.uniform(self.min_delay, self.max_delay)
+                if character in ",;":
+                    delay += self._random.uniform(0.12, 0.22)
+                elif character in ".!?":
+                    delay += self._random.uniform(0.18, 0.32)
+                elif character in "{}[]()":
+                    delay += self._random.uniform(0.05, 0.11)
+                elif character == " ":
+                    delay += self._random.uniform(0.015, 0.04)
+
+            # Event.wait keeps Stop responsive during long typing delays.
+            if cancel_event:
+                if cancel_event.wait(delay):
+                    raise TypingCancelled("Typing was stopped by the user.")
+            else:
+                time.sleep(delay)
 
     @classmethod
     def replace_current_document(cls) -> None:
