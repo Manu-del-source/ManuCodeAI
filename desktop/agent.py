@@ -1,4 +1,4 @@
-"""Standalone coding agent that operates on a folder, not a VS Code extension."""
+"""Standalone coding agent with OpenAI-compatible and Anthropic-compatible providers."""
 from __future__ import annotations
 
 import json
@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from openai import OpenAI
+from anthropic import Anthropic
 
 from .vscode import VSCodeController
 
@@ -85,12 +86,20 @@ TOOLS = [
     },
 ]
 
+ANTHROPIC_TOOLS = [
+    {
+        "name": tool["function"]["name"],
+        "description": tool["function"]["description"],
+        "input_schema": tool["function"]["parameters"],
+    }
+    for tool in TOOLS
+]
 
 SYSTEM_PROMPT = """You are ManuCodeAI, an autonomous software engineering agent.
 
 You operate on the project folder selected by the user in the ManuCodeAI desktop
 application. Visual Studio Code is only the editor where approved code is shown.
-There is no VS Code extension and no chat interface inside VS Code.
+There is no ManuCodeAI VS Code extension and no chat interface inside VS Code.
 
 WORKFLOW:
 1. Inspect the project with list_files.
@@ -118,9 +127,20 @@ class AgentError(RuntimeError):
     pass
 
 
+def discover_models(api_key: str, base_url: str) -> list[str]:
+    """Fetch model IDs from an OpenAI-compatible /models endpoint."""
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url.rstrip("/"), timeout=25.0)
+        response = client.models.list()
+        return sorted({item.id for item in response.data})
+    except Exception as error:
+        raise AgentError(f"Could not retrieve models: {error}") from error
+
+
 class CodingAgent:
     def __init__(
         self,
+        provider: str,
         api_key: str,
         base_url: str,
         model: str,
@@ -130,17 +150,27 @@ class CodingAgent:
         status: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
     ):
+        self.provider = provider
         self.workspace = workspace.resolve()
         self.vscode = vscode
         self.approve = approve
         self.status = status or (lambda _message: None)
         self.cancel_event = cancel_event or threading.Event()
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url=base_url.rstrip("/") if base_url.strip() else None,
-            timeout=180.0,
-        )
         self.model = model
+        if provider == "Coarena":
+            self.client = Anthropic(
+                api_key=api_key,
+                base_url=base_url.rstrip("/"),
+                timeout=180.0,
+            )
+        elif provider == "AgentRouter":
+            self.client = OpenAI(
+                api_key=api_key,
+                base_url=base_url.rstrip("/"),
+                timeout=180.0,
+            )
+        else:
+            raise AgentError(f"Unsupported AI provider: {provider}")
 
     def _check_cancelled(self) -> None:
         if self.cancel_event.is_set():
@@ -202,10 +232,7 @@ class CodingAgent:
         self._check_cancelled()
         self.status(f"Typing {relative} into VS Code...")
         self.vscode.write_file_visibly(
-            self.workspace,
-            relative,
-            content,
-            cancel_event=self.cancel_event,
+            self.workspace, relative, content, cancel_event=self.cancel_event,
         )
         return f"Successfully typed and saved {relative} in VS Code."
 
@@ -220,12 +247,8 @@ class CodingAgent:
         self.status(f"Running: {command}")
         try:
             result = subprocess.run(
-                command,
-                cwd=self.workspace,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=180,
+                command, cwd=self.workspace, shell=True, capture_output=True,
+                text=True, timeout=180,
             )
             return (
                 f"Exit code: {result.returncode}\n"
@@ -249,7 +272,7 @@ class CodingAgent:
         except Exception as error:
             return f"Tool error: {error}"
 
-    def run(self, prompt: str) -> str:
+    def _run_openai(self, prompt: str) -> str:
         history: list[dict] = [{"role": "user", "content": prompt}]
         for round_number in range(12):
             self._check_cancelled()
@@ -258,18 +281,14 @@ class CodingAgent:
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "system", "content": SYSTEM_PROMPT}, *history],
-                    tools=TOOLS,
-                    tool_choice="auto",
-                    temperature=0.2,
+                    tools=TOOLS, tool_choice="auto", temperature=0.2,
                 )
             except Exception as error:
                 raise AgentError(f"AI provider request failed: {error}") from error
-
             message = response.choices[0].message
             history.append(message.model_dump(exclude_none=True))
             if not message.tool_calls:
                 return message.content or "The model returned an empty response."
-
             for call in message.tool_calls:
                 self._check_cancelled()
                 try:
@@ -280,9 +299,51 @@ class CodingAgent:
                     self.status(f"Working: {call.function.name}")
                     result = self._execute_tool(call.function.name, arguments)
                 history.append({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": str(result),
+                    "role": "tool", "tool_call_id": call.id, "content": str(result),
                 })
+        raise AgentError("The agent reached its 12-round limit before finishing.")
+
+    def _run_anthropic(self, prompt: str) -> str:
+        history: list[dict] = [{"role": "user", "content": prompt}]
+        for round_number in range(12):
+            self._check_cancelled()
+            self.status(f"Analysing project — agent round {round_number + 1}")
+            try:
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=8192,
+                    system=SYSTEM_PROMPT,
+                    messages=history,
+                    tools=ANTHROPIC_TOOLS,
+                    temperature=0.2,
+                )
+            except Exception as error:
+                raise AgentError(f"AI provider request failed: {error}") from error
+
+            tool_results = []
+            text_parts = []
+            for block in response.content:
+                if block.type == "text":
+                    text_parts.append(block.text)
+                elif block.type == "tool_use":
+                    self._check_cancelled()
+                    self.status(f"Working: {block.name}")
+                    result = self._execute_tool(block.name, block.input)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": str(result),
+                    })
+
+            if not tool_results:
+                return "\n".join(text_parts) or "The model returned an empty response."
+
+            history.append({"role": "assistant", "content": response.content})
+            history.append({"role": "user", "content": tool_results})
 
         raise AgentError("The agent reached its 12-round limit before finishing.")
+
+    def run(self, prompt: str) -> str:
+        if self.provider == "Coarena":
+            return self._run_anthropic(prompt)
+        return self._run_openai(prompt)
