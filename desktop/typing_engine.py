@@ -50,6 +50,82 @@ class TypingCancelled(Exception):
     """Raised when the user stops an active typing session."""
 
 
+class KeyboardKillSwitch:
+    """Global Ctrl+Alt+F12 emergency stop; works while VS Code has focus."""
+
+    HOTKEY_ID = 0x4D43
+    MOD_ALT = 0x0001
+    MOD_CONTROL = 0x0002
+    MOD_NOREPEAT = 0x4000
+    VK_F12 = 0x7B
+    WM_HOTKEY = 0x0312
+    WM_QUIT = 0x0012
+
+    def __init__(self, cancel_event: threading.Event, on_trigger=None):
+        self.cancel_event = cancel_event
+        self.on_trigger = on_trigger
+        self._thread = None
+        self._thread_id = None
+        self._ready = threading.Event()
+        self.error = None
+
+    def start(self) -> bool:
+        if sys.platform != "win32":
+            self.error = "Global keyboard kill switch is supported on Windows only."
+            return False
+        if self._thread and self._thread.is_alive():
+            return True
+        self._ready.clear()
+        self.error = None
+        self._thread = threading.Thread(
+            target=self._message_loop, name="ManuCodeAI-KillSwitch", daemon=True
+        )
+        self._thread.start()
+        self._ready.wait(2.0)
+        return self.error is None and self._thread.is_alive()
+
+    def _message_loop(self) -> None:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        self._thread_id = kernel32.GetCurrentThreadId()
+        registered = bool(user32.RegisterHotKey(
+            None, self.HOTKEY_ID,
+            self.MOD_CONTROL | self.MOD_ALT | self.MOD_NOREPEAT,
+            self.VK_F12,
+        ))
+        if not registered:
+            self.error = (
+                "Could not register Ctrl+Alt+F12. Another application may already "
+                "use this shortcut; ManuCodeAI's Stop button remains available."
+            )
+            self._ready.set()
+            return
+
+        self._ready.set()
+        message = wintypes.MSG()
+        try:
+            while True:
+                result = user32.GetMessageW(ctypes.byref(message), None, 0, 0)
+                if result <= 0:
+                    break
+                if message.message == self.WM_HOTKEY and message.wParam == self.HOTKEY_ID:
+                    self.cancel_event.set()
+                    if self.on_trigger:
+                        self.on_trigger("EMERGENCY STOP: Ctrl+Alt+F12 pressed. Typing and agent work are stopping.")
+                    break
+        finally:
+            user32.UnregisterHotKey(None, self.HOTKEY_ID)
+
+    def stop(self) -> None:
+        if self._thread_id:
+            ctypes.windll.user32.PostThreadMessageW(
+                self._thread_id, self.WM_QUIT, 0, 0
+            )
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        self._thread_id = None
+
+
 class WindowsTypingEngine:
     """Types code progressively with a steady pace and small natural pauses."""
 
