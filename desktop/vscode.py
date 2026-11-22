@@ -19,6 +19,7 @@ class VSCodeError(RuntimeError):
 class VSCodeController:
     def __init__(self, typing_engine: WindowsTypingEngine | None = None):
         self.typing_engine = typing_engine or WindowsTypingEngine()
+        self._window_handle = None
 
     @staticmethod
     def _code_command() -> str:
@@ -34,7 +35,10 @@ class VSCodeController:
         folder = workspace.resolve()
         if not folder.is_dir():
             raise VSCodeError(f"Project folder does not exist: {folder}")
-        subprocess.Popen([self._code_command(), str(folder)], close_fds=True)
+        # Reuse one VS Code window for the entire project session.
+        subprocess.Popen(
+            [self._code_command(), "--reuse-window", str(folder)], close_fds=True
+        )
 
     @staticmethod
     def _focus_editor(filename: str, timeout: float = 8.0) -> None:
@@ -46,9 +50,19 @@ class VSCodeController:
         deadline = time.monotonic() + timeout
         matched = wintypes.HWND()
 
+        # Prefer the window already associated with this controller. Its title
+        # changes as files change, so validate the handle rather than reopening
+        # or creating another VS Code window for every file.
+        if self._window_handle and user32.IsWindow(self._window_handle):
+            length = user32.GetWindowTextLengthW(self._window_handle)
+            title = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(self._window_handle, title, length + 1)
+            if "visual studio code" in title.value.lower():
+                matched.value = self._window_handle
+
         @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         def visit(hwnd, _lparam):
-            if not user32.IsWindowVisible(hwnd):
+            if matched.value or not user32.IsWindowVisible(hwnd):
                 return True
             length = user32.GetWindowTextLengthW(hwnd)
             if not length:
@@ -62,9 +76,14 @@ class VSCodeController:
             return True
 
         while time.monotonic() < deadline:
-            user32.EnumWindows(visit, 0)
+            if not matched.value:
+                user32.EnumWindows(visit, 0)
             if matched.value:
-                user32.ShowWindow(matched, 9)  # SW_RESTORE
+                self._window_handle = matched.value
+                # Restore only if actually minimized. Do not change a normal
+                # or maximized window's state while switching between files.
+                if user32.IsIconic(matched):
+                    user32.ShowWindow(matched, 9)  # SW_RESTORE
                 if not user32.SetForegroundWindow(matched):
                     raise VSCodeError(
                         "Windows did not allow ManuCodeAI to focus VS Code. "
@@ -98,12 +117,13 @@ class VSCodeController:
         if not existed:
             target.touch()
 
+        # --reuse-window keeps navigation inside the already-open project
+        # window; never launch a second VS Code instance for each file.
         subprocess.Popen(
             [self._code_command(), "--reuse-window", "--goto", f"{target}:1"],
             close_fds=True,
         )
-        time.sleep(1.0)
-        self._focus_editor(target.name)
+        self._focus_editor(target.name, timeout=12.0)
 
         if cancel_event and cancel_event.is_set():
             return target
