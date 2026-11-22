@@ -179,10 +179,9 @@ class WindowsTypingEngine:
                     clipboard_changed = True
                     self._paste_clipboard()
                 elif character == "\t":
-                    encoded = "\t".encode("utf-16-le")
-                    unit = int.from_bytes(encoded, "little")
-                    self._send_input(unit, KEYEVENTF_UNICODE)
-                    self._send_input(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
+                    self._clipboard_set_unicode_text("\t")
+                    clipboard_changed = True
+                    self._paste_clipboard()
                 else:
                     encoded = character.encode("utf-16-le")
                     for offset in range(0, len(encoded), 2):
