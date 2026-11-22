@@ -121,8 +121,8 @@ AUTONOMOUS WORKFLOW:
 8. After Python changes, run a project-appropriate validation command such as
    py -m compileall -q . (or py -m py_compile path\\to\\file.py for a focused check),
    then run relevant tests. If a check fails, inspect the referenced source and repair it.
-9. Continue until the requested task is complete or a genuine blocker remains.
-8. Summarize files changed, commands run, test results, and any remaining blockers.
+10. Continue until the requested task is complete or a genuine blocker remains.
+11. Summarize files changed, commands run, test results, and any remaining blockers.
 
 RULES:
 - Do not ask the user to approve individual file changes or terminal commands.
@@ -297,7 +297,28 @@ class CodingAgent:
         self.vscode.write_file_visibly(
             self.workspace, relative, content, cancel_event=self.cancel_event,
         )
-        return f"Successfully typed and saved {relative} in VS Code."
+        self._check_cancelled()
+        try:
+            saved_content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            return f"File was typed but could not be verified after saving: {error}"
+        expected = content.replace("\\r\\n", "\\n").replace("\\r", "\\n")
+        actual = saved_content.replace("\\r\\n", "\\n").replace("\\r", "\\n")
+        if actual != expected:
+            return (
+                f"Post-save verification failed for {relative}: the saved file differs "
+                "from the requested content. Do not report this write as successful. "
+                "Inspect the editor/typing issue and retry."
+            )
+        if path.suffix.lower() == ".py":
+            try:
+                ast.parse(saved_content, filename=relative)
+            except SyntaxError as error:
+                return (
+                    f"Post-save Python validation failed in {relative} at line "
+                    f"{error.lineno}: {error.msg}. Read the saved file, fix it, and retry."
+                )
+        return f"Successfully typed, saved, and verified {relative}."
 
     def _run_command(self, command: str) -> str:
         self._check_cancelled()
