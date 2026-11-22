@@ -217,8 +217,8 @@ class WindowsTypingEngine:
         finally:
             # Restore previous plain text if the clipboard contained text.
             # If it held a non-text format, it cannot be reconstructed here.
-            if clipboard_changed and previous_clipboard is not None:
-                self._clipboard_set_unicode_text(previous_clipboard)
+            if clipboard_changed:
+                self._clipboard_set_unicode_text(previous_clipboard or "")
 
     @classmethod
     def replace_current_document(cls) -> None:
