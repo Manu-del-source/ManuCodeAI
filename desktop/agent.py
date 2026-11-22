@@ -30,7 +30,10 @@ SECRET_NAMES = {
 }
 SECRET_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
 
-MAX_AGENT_ROUNDS = max(12, int(os.environ.get("MANUCODE_MAX_ROUNDS", "60")))
+try:
+    MAX_AGENT_ROUNDS = max(12, int(os.environ.get("MANUCODE_MAX_ROUNDS", "60")))
+except ValueError:
+    MAX_AGENT_ROUNDS = 60
 CONTINUATION_INTERVAL = 12
 PROGRESS_FILENAME = "progress.json"
 
@@ -148,7 +151,9 @@ DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
 9. Do not make unrelated changes. Preserve existing architecture, naming, formatting, and behavior.
 10. After implementation, run focused syntax checks and relevant tests/build/lint commands.
     Review the output. Fix actual failures with targeted edits, then rerun the failed checks.
-11. Finish with a concise engineering report: files changed, behavior added/fixed, commands run,
+11. For long tasks, continue through the automatic development phases. Do not stop after
+    scaffolding or one module; keep implementing and verifying until the requested scope is done.
+12. Finish with a concise engineering report: files changed, behavior added/fixed, commands run,
     test results, and anything not verified or still blocked.
 
 RULES:
