@@ -51,13 +51,13 @@ class TypingCancelled(Exception):
 
 
 class KeyboardKillSwitch:
-    """Global Ctrl+Alt+F12 emergency stop; works while VS Code has focus."""
+    """Global Ctrl+Shift+X emergency stop; works while VS Code has focus."""
 
     HOTKEY_ID = 0x4D43
-    MOD_ALT = 0x0001
+    MOD_SHIFT = 0x0004
     MOD_CONTROL = 0x0002
     MOD_NOREPEAT = 0x4000
-    VK_F12 = 0x7B
+    VK_X = 0x58
     WM_HOTKEY = 0x0312
     WM_QUIT = 0x0012
 
@@ -90,12 +90,12 @@ class KeyboardKillSwitch:
         self._thread_id = kernel32.GetCurrentThreadId()
         registered = bool(user32.RegisterHotKey(
             None, self.HOTKEY_ID,
-            self.MOD_CONTROL | self.MOD_ALT | self.MOD_NOREPEAT,
-            self.VK_F12,
+            self.MOD_CONTROL | self.MOD_SHIFT | self.MOD_NOREPEAT,
+            self.VK_X,
         ))
         if not registered:
             self.error = (
-                "Could not register Ctrl+Alt+F12. Another application may already "
+                "Could not register Ctrl+Shift+X. Another application may already "
                 "use this shortcut; ManuCodeAI's Stop button remains available."
             )
             self._ready.set()
@@ -111,7 +111,7 @@ class KeyboardKillSwitch:
                 if message.message == self.WM_HOTKEY and message.wParam == self.HOTKEY_ID:
                     self.cancel_event.set()
                     if self.on_trigger:
-                        self.on_trigger("EMERGENCY STOP: Ctrl+Alt+F12 pressed. Typing and agent work are stopping.")
+                        self.on_trigger("EMERGENCY STOP: Ctrl+Shift+X pressed. Typing and agent work are stopping.")
                     break
         finally:
             user32.UnregisterHotKey(None, self.HOTKEY_ID)
