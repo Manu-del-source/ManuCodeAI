@@ -4,6 +4,9 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Callable
 
@@ -127,9 +130,20 @@ class AgentError(RuntimeError):
     pass
 
 
-def discover_models(api_key: str, base_url: str) -> list[str]:
-    """Fetch model IDs from an OpenAI-compatible /models endpoint."""
+def discover_models(api_key: str, base_url: str, provider: str = "") -> list[str]:
+    """Fetch model IDs from the provider's model-list endpoint."""
     try:
+        if provider == "Gemini":
+            url = "https://generativelanguage.googleapis.com/v1beta/models?" + urllib.parse.urlencode({"key": api_key})
+            request = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(request, timeout=25) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            return sorted({
+                item["name"].removeprefix("models/")
+                for item in payload.get("models", [])
+                if "generateContent" in item.get("supportedGenerationMethods", [])
+            })
+
         client = OpenAI(api_key=api_key, base_url=base_url.rstrip("/"), timeout=25.0)
         response = client.models.list()
         return sorted({item.id for item in response.data})
@@ -278,10 +292,12 @@ class CodingAgent:
             self._check_cancelled()
             self.status(f"Analysing project — agent round {round_number + 1}")
             try:
+                self.status(f"Sending request to {self.provider} using model {self.model}...")
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "system", "content": SYSTEM_PROMPT}, *history],
                     tools=TOOLS, tool_choice="auto", temperature=0.2,
+                    timeout=75.0,
                 )
             except Exception as error:
                 raise AgentError(f"AI provider request failed: {error}") from error
