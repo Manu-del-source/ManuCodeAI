@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 from .agent import CodingAgent, discover_models
 from .vscode import VSCodeController
+from .typing_engine import KeyboardKillSwitch
 
 
 APP_ORG = "ManuCodeAI"
@@ -60,7 +61,15 @@ class AgentWorker(QThread):
         self.cancel_event = threading.Event()
 
     def run(self) -> None:
+        kill_switch = KeyboardKillSwitch(self.cancel_event, self.status.emit)
         try:
+            if kill_switch.start():
+                self.status.emit("Keyboard emergency stop active: press Ctrl+Alt+F12 at any time.")
+            else:
+                self.status.emit(
+                    f"Keyboard emergency stop unavailable: {kill_switch.error}. "
+                    "The Stop button is still available."
+                )
             self.status.emit("Opening project in Visual Studio Code...")
             vscode = VSCodeController()
             vscode.open_workspace(self.workspace)
@@ -77,6 +86,8 @@ class AgentWorker(QThread):
             self.completed.emit(agent.run(self.prompt))
         except Exception as error:
             self.failed.emit(str(error))
+        finally:
+            kill_switch.stop()
 
 
 class MainWindow(QMainWindow):
