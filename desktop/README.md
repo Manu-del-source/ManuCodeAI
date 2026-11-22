@@ -39,6 +39,8 @@ credential store. The API key is not written to project files or settings.
   automatic PowerShell command execution.
 - VS Code launcher using the `code` command.
 - Native Windows `SendInput` Unicode typing, with variable character delays.
+- Global emergency stop: press `Ctrl+Alt+F12` from any application to stop typing and cancel the active coding session; the on-screen Stop button remains available as a fallback.
+- Python files are syntax-checked before typing and checked again after saving; typing progress is reported in the activity log.
 - File changes and project commands run automatically without per-action approval prompts.
 
 ## Development setup
@@ -77,8 +79,9 @@ VS Code must be installed and its `code` command must be available on PATH.
 - Model availability depends on the API key and provider account.
 - Coarena model discovery is manual in this version; enter the model ID given
   by Coarena.
-- VS Code must be the foreground application when typing begins. Do not use
-  the keyboard or switch applications during an active typing operation.
+- VS Code must be the foreground application when typing begins. Avoid typing
+  into the editor during an active automated write; `Ctrl+Alt+F12` is reserved as
+  the global emergency stop shortcut and can be pressed at any time.
 - The agent runs autonomously inside the selected project. It blocks selected high-risk
   system administration commands and protects secret files and paths outside the project.
 - Registration, packaged installer work, and richer model capability checks
