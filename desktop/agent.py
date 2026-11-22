@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+from datetime import datetime, timezone
 import re
 import subprocess
 import threading
@@ -21,13 +22,17 @@ from .vscode import VSCodeController
 
 IGNORED_DIRS = {
     ".git", ".venv", "venv", "node_modules", "__pycache__",
-    ".next", "dist", "build", ".idea", ".vscode",
+    ".next", "dist", "build", ".idea", ".vscode", ".manucodeai",
 }
 SECRET_NAMES = {
     ".env", ".env.local", ".env.production", "id_rsa", "id_ed25519",
     "credentials.json", "secrets.json",
 }
 SECRET_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
+
+MAX_AGENT_ROUNDS = max(12, int(os.environ.get("MANUCODE_MAX_ROUNDS", "60")))
+CONTINUATION_INTERVAL = 12
+PROGRESS_FILENAME = "progress.json"
 
 
 TOOLS = [
@@ -221,6 +226,8 @@ class CodingAgent:
         self.model = model
         self._read_since_write: set[str] = set()
         self._last_written_content: dict[str, str] = {}
+        self.progress_path = self.workspace / ".manucodeai" / PROGRESS_FILENAME
+        self.progress: dict = {}
         if provider == "Coarena":
             self.client = Anthropic(
                 api_key=api_key,
@@ -239,6 +246,75 @@ class CodingAgent:
     def _check_cancelled(self) -> None:
         if self.cancel_event.is_set():
             raise AgentError("Coding session stopped.")
+
+    def _save_progress(self) -> None:
+        """Persist a compact checkpoint without storing command output or credentials."""
+        try:
+            self.progress_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.progress_path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(self.progress, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            temporary.replace(self.progress_path)
+        except OSError as error:
+            self.status(f"Could not save progress checkpoint: {error}")
+
+    def _record_tool_event(self, tool_name: str, arguments: dict, round_number: int) -> None:
+        target = arguments.get("filename") or arguments.get("directory") or ""
+        if tool_name == "run_command":
+            target = "project command"
+        event = {
+            "round": round_number,
+            "tool": tool_name,
+            "target": str(target)[:180],
+            "time": datetime.now(timezone.utc).isoformat(),
+        }
+        events = self.progress.setdefault("events", [])
+        events.append(event)
+        self.progress["events"] = events[-120:]
+        self.progress["last_round"] = round_number
+        self._save_progress()
+
+    def _prepare_progress(self, prompt: str) -> str:
+        """Resume the same unfinished task from its checkpoint; new prompts start fresh."""
+        previous: dict = {}
+        try:
+            if self.progress_path.is_file():
+                previous = json.loads(self.progress_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = {}
+
+        if previous.get("task") == prompt and previous.get("status") in {"running", "paused"}:
+            self.progress = previous
+            recent = previous.get("events", [])[-30:]
+            summary = "\n".join(
+                "- Round {}: {} {}".format(
+                    item.get("round"), item.get("tool"), item.get("target", "")
+                ).strip()
+                for item in recent
+            ) or "- No completed tool actions were checkpointed."
+            self.status("Resuming the unfinished task from its saved project checkpoint...")
+            return (
+                prompt
+                + "\n\nRESUME FROM THE EXISTING PROJECT CHECKPOINT. Inspect current files "
+                "before changing them; some earlier operations may already have succeeded. "
+                "Do not repeat completed work unnecessarily. Continue the original task, "
+                "verify prior changes, and finish remaining work.\nRecent recorded actions:\n"
+                + summary
+            )
+
+        self.progress = {
+            "task": prompt,
+            "status": "running",
+            "provider": self.provider,
+            "model": self.model,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "last_round": 0,
+            "events": [],
+        }
+        self._save_progress()
+        return prompt
 
     def _safe_path(self, filename: str) -> Path:
         path = (self.workspace / filename).resolve()
@@ -436,9 +512,9 @@ class CodingAgent:
 
     def _run_openai(self, prompt: str) -> str:
         history: list[dict] = [{"role": "user", "content": prompt}]
-        for round_number in range(12):
+        for round_number in range(1, MAX_AGENT_ROUNDS + 1):
             self._check_cancelled()
-            self.status(f"Analysing project — agent round {round_number + 1}")
+            self.status(f"Analysing project — agent round {round_number}/{MAX_AGENT_ROUNDS}")
             try:
                 self.status(f"Sending request to {self.provider} using model {self.model}...")
                 response = self.client.chat.completions.create(
@@ -462,14 +538,33 @@ class CodingAgent:
                 else:
                     self.status(f"Working: {call.function.name}")
                     result = self._execute_tool(call.function.name, arguments)
+                    self._record_tool_event(call.function.name, arguments, round_number)
                 history.append({
                     "role": "tool", "tool_call_id": call.id, "content": str(result),
                 })
-        raise AgentError("The agent reached its 12-round limit before finishing.")
+            if round_number % CONTINUATION_INTERVAL == 0 and round_number < MAX_AGENT_ROUNDS:
+                phase = round_number // CONTINUATION_INTERVAL + 1
+                self.status(
+                    f"Continuing development — phase {phase}; "
+                    f"checkpoint saved after {round_number} rounds."
+                )
+                history.append({
+                    "role": "user",
+                    "content": (
+                        "Continue the same development task. This is an automatic continuation, "
+                        "not a new task. Avoid repeating completed actions. Continue implementation, "
+                        "verification, and fixes until the task is genuinely complete."
+                    ),
+                })
+        raise AgentError(
+            f"The agent reached the {MAX_AGENT_ROUNDS}-round safety limit. "
+            "Progress was saved in .manucodeai/progress.json. Start the same task again "
+            "to resume from the checkpoint, or increase MANUCODE_MAX_ROUNDS."
+        )
 
     def _run_anthropic(self, prompt: str) -> str:
         history: list[dict] = [{"role": "user", "content": prompt}]
-        for round_number in range(12):
+        for round_number in range(1, MAX_AGENT_ROUNDS + 1):
             self._check_cancelled()
             self.status(f"Analysing project — agent round {round_number + 1}")
             try:
@@ -492,6 +587,7 @@ class CodingAgent:
                     self._check_cancelled()
                     self.status(f"Working: {block.name}")
                     result = self._execute_tool(block.name, block.input)
+                    self._record_tool_event(block.name, block.input, round_number)
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -503,10 +599,42 @@ class CodingAgent:
 
             history.append({"role": "assistant", "content": response.content})
             history.append({"role": "user", "content": tool_results})
+            if round_number % CONTINUATION_INTERVAL == 0 and round_number < MAX_AGENT_ROUNDS:
+                phase = round_number // CONTINUATION_INTERVAL + 1
+                self.status(
+                    f"Continuing development — phase {phase}; "
+                    f"checkpoint saved after {round_number} rounds."
+                )
+                history.append({
+                    "role": "user",
+                    "content": (
+                        "Continue the same development task. This is an automatic continuation, "
+                        "not a new task. Avoid repeating completed actions. Continue implementation, "
+                        "verification, and fixes until the task is genuinely complete."
+                    ),
+                })
 
-        raise AgentError("The agent reached its 12-round limit before finishing.")
+        raise AgentError(
+            f"The agent reached the {MAX_AGENT_ROUNDS}-round safety limit. "
+            "Progress was saved in .manucodeai/progress.json. Start the same task again "
+            "to resume from the checkpoint, or increase MANUCODE_MAX_ROUNDS."
+        )
 
     def run(self, prompt: str) -> str:
-        if self.provider == "Coarena":
-            return self._run_anthropic(prompt)
-        return self._run_openai(prompt)
+        effective_prompt = self._prepare_progress(prompt)
+        try:
+            if self.provider == "Coarena":
+                result = self._run_anthropic(effective_prompt)
+            else:
+                result = self._run_openai(effective_prompt)
+            self.progress["status"] = "completed"
+            self.progress["completed_at"] = datetime.now(timezone.utc).isoformat()
+            self.progress["final_summary"] = result[-4000:]
+            self._save_progress()
+            return result
+        except Exception as error:
+            self.progress["status"] = "paused"
+            self.progress["last_error"] = str(error)[:1000]
+            self.progress["paused_at"] = datetime.now(timezone.utc).isoformat()
+            self._save_progress()
+            raise
