@@ -784,6 +784,14 @@ class CodingAgent:
             item = self.file_manifest.get("files", {}).get(relative, {})
             if item.get("status") != "COMPLETED":
                 incomplete.append(f"{relative} [{item.get('status', 'NOT_IN_PLAN')}]")
+            else:
+                expected_digest = item.get("verified_sha256")
+                try:
+                    actual_digest = hashlib.sha256(self._safe_path(relative).read_bytes()).hexdigest()
+                except OSError:
+                    actual_digest = ""
+                if not expected_digest or actual_digest != expected_digest:
+                    incomplete.append(f"{relative} [saved content changed after verification]")
         if manifest_names != planned:
             incomplete.append("The supplied completion list does not exactly match the persisted file plan.")
         for relative in sorted(manifest_names - planned):
@@ -883,21 +891,49 @@ class CodingAgent:
         except Exception as error:
             return f"Tool error: {error}"
 
+
+    def _provider_request(self, request, provider_label: str):
+        """Retry transient provider/network failures without discarding agent history."""
+        delays = (2, 4, 8)
+        for attempt in range(len(delays) + 1):
+            self._check_cancelled()
+            try:
+                return request()
+            except Exception as error:
+                status_code = getattr(error, "status_code", None)
+                retryable = (
+                    status_code is None
+                    or status_code in {408, 409, 425, 429}
+                    or (isinstance(status_code, int) and status_code >= 500)
+                )
+                if not retryable or attempt >= len(delays):
+                    raise AgentError(
+                        f"{provider_label} request failed after {attempt + 1} attempt(s): {error}"
+                    ) from error
+                delay = delays[attempt]
+                self.status(
+                    f"{provider_label} temporary failure"
+                    + (f" (HTTP {status_code})" if status_code else "")
+                    + f". Retrying in {delay}s; completed file progress is preserved."
+                )
+                if self.cancel_event.wait(delay):
+                    raise AgentError("Coding session stopped during provider retry.") from error
+
     def _run_openai(self, prompt: str) -> str:
         history: list[dict] = [{"role": "user", "content": prompt}]
         for round_number in range(1, MAX_AGENT_ROUNDS + 1):
             self._check_cancelled()
             self.status(f"Analysing project — agent round {round_number}/{MAX_AGENT_ROUNDS}")
-            try:
-                self.status(f"Sending request to {self.provider} using model {self.model}...")
-                response = self.client.chat.completions.create(
+            self.status(f"Sending request to {self.provider} using model {self.model}...")
+            response = self._provider_request(
+                lambda: self.client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "system", "content": SYSTEM_PROMPT}, *history],
                     tools=TOOLS, tool_choice="auto", temperature=0.2,
                     timeout=75.0,
-                )
-            except Exception as error:
-                raise AgentError(f"AI provider request failed: {error}") from error
+                ),
+                self.provider,
+            )
             message = response.choices[0].message
             history.append(message.model_dump(exclude_none=True))
             if not message.tool_calls:
@@ -940,16 +976,16 @@ class CodingAgent:
         for round_number in range(1, MAX_AGENT_ROUNDS + 1):
             self._check_cancelled()
             self.status(f"Analysing project — agent round {round_number}/{MAX_AGENT_ROUNDS}")
-            try:
-                response = self.client.messages.create(
+            response = self._provider_request(
+                lambda: self.client.messages.create(
                     model=self.model,
                     max_tokens=8192,
                     system=SYSTEM_PROMPT,
                     messages=history,
                     tools=ANTHROPIC_TOOLS,
-                )
-            except Exception as error:
-                raise AgentError(f"AI provider request failed: {error}") from error
+                ),
+                self.provider,
+            )
 
             tool_results = []
             text_parts = []
