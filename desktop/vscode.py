@@ -111,7 +111,7 @@ class VSCodeController:
         # Create an empty file only when necessary; existing content is never appended.
         target.touch(exist_ok=True)
         subprocess.Popen(
-            [self._code_command(), "--goto", f"{target}:1"],
+            [self._code_command(), "--reuse-window", "--goto", f"{target}:1"],
             close_fds=True,
         )
         self._focus_editor(str(target), cancel_event=cancel_event)
