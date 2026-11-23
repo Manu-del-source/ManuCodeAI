@@ -75,7 +75,7 @@ TOOLS = [
                 "Create a new project text file autonomously. For an existing file, prefer "
                 "edit_file with a precise old_text/new_text replacement. A successful full "
                 "write may not be repeated in the same session; use edit_file for corrections. "
-                "The app writes the exact content atomically to disk, verifies it, then opens the saved file in VS Code."
+                "The app opens the target in VS Code, clears the document exactly once, types the content progressively at a natural human pace, saves, and verifies the saved file. Never append a full file to existing content."
             ),
             "parameters": {
                 "type": "object",
@@ -173,7 +173,7 @@ ANTHROPIC_TOOLS = [
 SYSTEM_PROMPT = """You are ManuCodeAI, a fully autonomous software engineering agent.
 
 You operate on the project folder selected by the user in the ManuCodeAI desktop
-application. Visual Studio Code is only the editor where saved code changes are shown. File contents are written directly and atomically to disk; never use simulated keyboard typing to write source files.
+application. Use Visual Studio Code as the visible editor and type every generated source-file change progressively so the user can watch it being entered. Never bypass visible typing by writing source files directly to disk.
 There is no ManuCodeAI VS Code extension and no chat interface inside VS Code.
 
 DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
@@ -182,7 +182,7 @@ DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
 3. Before coding, form a short internal plan: list the intended files, the purpose of each change,
    and how you will verify it. Do not send a separate planning-only response; continue working.
 4. Implement one logical change at a time. Finish and verify that change before moving to the next.
-5. For a new file, use write_file once with the complete initial content. The tool replaces the file atomically on disk and opens it in VS Code only after the disk write succeeds.
+5. For a new file, use write_file once with the complete initial content. The tool opens the file in VS Code, selects and clears its contents exactly once, then types the complete content visibly and saves it.
 6. For an existing file, prefer edit_file with a small, exact old_text/new_text replacement.
    Use write_file for an existing file only when a substantial rewrite is genuinely necessary.
 7. Never call write_file or edit_file repeatedly with the same content. Do not rewrite a file
@@ -619,9 +619,9 @@ class CodingAgent:
                 return detail
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.status(f"Writing {relative} atomically to disk...")
+        self.status(f"Opening {relative} in VS Code for visible typing...")
         self._check_cancelled()
-        self.vscode.write_file_and_open(
+        self.vscode.write_file_visibly(
             self.workspace, relative, content, cancel_event=self.cancel_event,
             progress_callback=None,
         )
@@ -663,7 +663,7 @@ class CodingAgent:
         self.progress["last_completed_file"] = relative
         self._save_progress()
         self.status(f"Completed {relative}. Moving to the next unfinished file.")
-        return f"Successfully written atomically, reopened, and verified {relative}. Move to a different unfinished file."
+        return f"Successfully typed visibly in VS Code, saved, and verified {relative}. Move to a different unfinished file."
 
     def _edit_file(self, filename: str, old_text: str, new_text: str) -> str:
         self._check_cancelled()
