@@ -1,1 +1,1 @@
-"""ManuCodeAI standalone Windows desktop application."""
+"""Cross-platform standalone ManuCodeAI desktop application."""
