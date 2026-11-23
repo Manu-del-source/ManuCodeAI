@@ -380,7 +380,7 @@ class LinuxTypingEngine:
                   progress_callback=None) -> None:
         if sys.platform != "linux":
             raise OSError("LinuxTypingEngine can only run on Linux.")
-        text = text.replace("\\r\\n", "\\n").replace("\\r", "\\n")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
         total = len(text)
         previous_clipboard = self._clipboard_get()
         clipboard_changed = False
@@ -388,17 +388,17 @@ class LinuxTypingEngine:
             for index, character in enumerate(text, start=1):
                 if cancel_event and cancel_event.is_set():
                     raise TypingCancelled("Typing was stopped by the user.")
-                if character in {"\\n", "\\t"}:
+                if character in {"\n", "\t"}:
                     self._clipboard_set(character)
                     clipboard_changed = True
                     self._paste_clipboard()
                 else:
                     self._run(["xdotool", "type", "--clearmodifiers", "--delay", "0", "--", character])
                 if progress_callback and (
-                    character == "\\n" or index % 25 == 0 or index == total
+                    character == "\n" or index % 25 == 0 or index == total
                 ):
                     progress_callback(index, total)
-                if character == "\\n":
+                if character == "\n":
                     delay = self._random.uniform(self.line_delay_min, self.line_delay_max)
                 else:
                     delay = self._random.uniform(self.min_delay, self.max_delay)
