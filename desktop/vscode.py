@@ -59,18 +59,29 @@ class VSCodeController:
                     raise VSCodeError("Typing cancelled while waiting for VS Code.")
                 try:
                     found = subprocess.run(
-                        ["xdotool", "search", "--onlyvisible", "--name", target_name],
+                        ["xdotool", "search", "--onlyvisible", "--name", "Visual Studio Code"],
                         capture_output=True, text=True, check=False,
                     )
                     window_ids = [item for item in found.stdout.splitlines() if item.strip()]
-                    if found.returncode == 0 and window_ids:
+                    for window_id in reversed(window_ids):
+                        title = subprocess.run(
+                            ["xdotool", "getwindowname", window_id],
+                            capture_output=True, text=True, check=False,
+                        )
+                        if title.returncode != 0 or target_name.lower() not in title.stdout.lower():
+                            continue
                         activated = subprocess.run(
-                            ["xdotool", "windowactivate", "--sync", window_ids[-1]],
+                            ["xdotool", "windowactivate", "--sync", window_id],
                             capture_output=True, text=True, check=False,
                         )
                         if activated.returncode == 0:
-                            time.sleep(0.25)
-                            return
+                            active = subprocess.run(
+                                ["xdotool", "getactivewindow"],
+                                capture_output=True, text=True, check=False,
+                            )
+                            if active.returncode == 0 and active.stdout.strip() == window_id:
+                                time.sleep(0.25)
+                                return
                 except OSError:
                     pass
                 time.sleep(0.25)
