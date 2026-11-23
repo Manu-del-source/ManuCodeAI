@@ -186,14 +186,14 @@ DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
 6. For an existing file, prefer edit_file with a small, exact old_text/new_text replacement.
    Use write_file for an existing file only when a substantial rewrite is genuinely necessary.
 7. Never call write_file or edit_file repeatedly with the same content. Do not rewrite a file
-   just to show progress. After a successful full write, mark that file COMPLETED before touching another file.
-   A file that has already been written and verified must never be written again. Use
-   edit_file only for a concrete, targeted correction.
-8. Maintain forward progress through the planned file list. After a file is successfully
-   written and verified, record it as completed in your working plan and move to the next
-   unfinished file. Do not keep reopening completed files without a concrete test failure,
-   syntax error, or unmet requirement. If a correction is necessary, read the latest version
-   and use one targeted edit, then rerun the relevant check.
+   just to show progress. After a successful write or edit, verify the saved content. The
+   application records successful writes as completed automatically; do not manually mark
+   a successful file COMPLETED. A verified file must never be changed again without a
+   concrete defect or unmet requirement. Use edit_file only for a targeted correction.
+8. Maintain forward progress through the planned file list. Once the application confirms
+   a file is saved and verified, move to the next unfinished file. Do not reopen completed
+   files without a concrete test failure, syntax error, or unmet requirement. If a correction
+   is necessary, read the latest version and use one targeted edit, then rerun the relevant check.
 8a. Never make consecutive successful changes to the same file. After a successful write
    or edit, immediately move to a different unfinished file. The tools enforce a per-file
    edit limit and a same-file cooldown; do not try alternate tool calls to bypass it.
@@ -226,7 +226,8 @@ RULES:
 - A successful write/edit is a completed step: do not repeat it unless verification reveals
   a specific problem or a new requirement requires another change.
 - On Windows, run commands through PowerShell and prefer native PowerShell commands
-  such as Get-ChildItem. Do not assume a Unix shell.
+  such as Get-ChildItem. On Linux, use the configured system shell and native Linux
+  commands. Never assume the other operating system's shell or command syntax.
 - Prefer list_files for project discovery instead of shell directory-dump commands.
 - Do not declare a project empty until list_files has checked the selected root and
   reported its resolved path and directory contents.
