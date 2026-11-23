@@ -1,6 +1,40 @@
 # ManuCodeAI
 
-AI coding agent integrated into Visual Studio Code.
+AI coding agent with a standalone desktop application for Windows and Linux, using Visual Studio Code as the visible editor.
+
+## Standalone desktop application
+
+The desktop app is the primary autonomous workflow. It plans only the files that need changes, processes them in order, types changes visibly in VS Code at a deliberately paced and configurable rate, saves and verifies each file, and persists progress under `.manucodeai/` in the selected project.
+
+### Windows
+
+Install Python 3.11 or newer and Visual Studio Code. Ensure the `code` command is available on PATH.
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+py -m pip install -r requirements.txt
+py -m desktop.app
+```
+
+### Linux
+
+Install Python 3.11 or newer, Visual Studio Code, and the visible-input utilities for your desktop session.
+
+For Fedora KDE/X11:
+
+```bash
+sudo dnf install xdotool xclip
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m desktop.app
+```
+
+For Wayland, install `xdotool` and `wl-clipboard` (`wl-copy` and `wl-paste`). Some Wayland compositors restrict programmatic window activation; if ManuCodeAI cannot confirm VS Code focus, bring the requested VS Code tab to the foreground and retry. ManuCodeAI will not send keyboard input when it cannot confirm focus.
+
+The Windows backend uses native keyboard input. The Linux backend uses `xdotool` and the session clipboard. Both retain the same adjustable natural typing delays and literal newline/tab insertion.
+
 
 ## Architecture
 
