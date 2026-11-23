@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import threading
 import time
+import os
+import sys
 from ctypes import wintypes
 from pathlib import Path
 
