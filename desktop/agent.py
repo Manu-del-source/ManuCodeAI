@@ -115,7 +115,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_command",
-            "description": "Run a project command autonomously in the selected project directory using PowerShell on Windows. Application startup and integration tests are blocked until complete_implementation succeeds.",
+            "description": "Run a project command autonomously in the selected project directory using PowerShell on Windows or the configured shell on Linux. Application startup and integration tests are blocked until complete_implementation succeeds.",
             "parameters": {
                 "type": "object",
                 "properties": {"command": {"type": "string"}},
@@ -128,7 +128,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "set_file_plan",
-            "description": "Persist the ordered list of files that genuinely need implementation for this task. Call once after initial inspection and before coding; preserve the existing ordered plan on resume. The application advances automatically when a file is visibly typed, saved, and verified."
+            "description": "Persist the ordered list of files that genuinely need implementation for this task. Call once after initial inspection and before coding; preserve the existing ordered plan on resume. The application advances automatically when a file is visibly typed, saved, and verified.",
             "parameters": {"type":"object","properties":{"planned_files":{"type":"array","items":{"type":"string"},"minItems":1}},"required":["planned_files"],"additionalProperties":False}
         }
     },
