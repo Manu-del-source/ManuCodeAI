@@ -430,8 +430,12 @@ class CodingAgent:
             if relative not in normalized:
                 normalized.append(relative)
         old = self.file_manifest.get("files", {})
+        # Merge rather than replace: a resumed model must not accidentally erase
+        # unfinished files from the original plan by submitting a shorter list.
+        ordered_names = list(old)
+        ordered_names.extend(name for name in normalized if name not in old)
         files = {}
-        for relative in normalized:
+        for relative in ordered_names:
             prior = old.get(relative, {})
             status = prior.get("status", "NOT_STARTED")
             if status not in {"NOT_STARTED", "IN_PROGRESS", "COMPLETED", "NEEDS_CORRECTION"}:
@@ -535,7 +539,14 @@ class CodingAgent:
         self._check_cancelled()
         path = self._safe_path(filename)
         relative = path.relative_to(self.workspace).as_posix()
-        manifest_entry = self.file_manifest.get("files", {}).get(relative, {})
+        manifest_files = self.file_manifest.get("files", {})
+        manifest_entry = manifest_files.get(relative, {})
+        if not manifest_files:
+            return "Write blocked: call set_file_plan first and register the files that need implementation."
+        if relative not in manifest_files:
+            return f"Write blocked: {relative} is not in the persisted file plan. Add it to the plan before editing."
+        if manifest_entry.get("status") == "NOT_STARTED":
+            return f"Write blocked: mark {relative} IN_PROGRESS with update_file_status before editing it."
         if manifest_entry.get("status") == "COMPLETED":
             return f"Edit blocked: {relative} is marked COMPLETED in the persistent plan. If a concrete defect exists, mark it NEEDS_CORRECTION first."
         if self._last_successful_file_change == relative:
@@ -672,6 +683,7 @@ class CodingAgent:
                 missing.append(str(filename))
         incomplete = []
         planned = set()
+        manifest_names = set(self.file_manifest.get("files", {}))
         for filename in planned_files:
             try:
                 relative = self._safe_path(filename).relative_to(self.workspace).as_posix()
@@ -681,6 +693,10 @@ class CodingAgent:
             item = self.file_manifest.get("files", {}).get(relative, {})
             if item.get("status") != "COMPLETED":
                 incomplete.append(f"{relative} [{item.get('status', 'NOT_IN_PLAN')}]")
+        if manifest_names != planned:
+            incomplete.append("The supplied completion list does not exactly match the persisted file plan.")
+        for relative in sorted(manifest_names - planned):
+            incomplete.append(f"{relative} [omitted from completion list]")
         if invalid or missing or incomplete:
             details = []
             if missing:
