@@ -128,7 +128,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "set_file_plan",
-            "description": "Persist the ordered list of files that genuinely need implementation for this task. Call after initial inspection and before coding.",
+            "description": "Persist the ordered list of files that genuinely need implementation for this task. Call once after initial inspection and before coding; preserve the existing ordered plan on resume.",
             "parameters": {"type":"object","properties":{"planned_files":{"type":"array","items":{"type":"string"},"minItems":1}},"required":["planned_files"],"additionalProperties":False}
         }
     },
@@ -186,8 +186,9 @@ DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
 6. For an existing file, prefer edit_file with a small, exact old_text/new_text replacement.
    Use write_file for an existing file only when a substantial rewrite is genuinely necessary.
 7. Never call write_file or edit_file repeatedly with the same content. Do not rewrite a file
-   just to show progress. After a successful full write, that file is locked against another
-   full write for the rest of this session. Use edit_file for a specific correction.
+   just to show progress. After a successful full write, mark that file COMPLETED before touching another file.
+   A file that has already been written and verified must never be written again. Use
+   edit_file only for a concrete, targeted correction.
 8. Maintain forward progress through the planned file list. After a file is successfully
    written and verified, record it as completed in your working plan and move to the next
    unfinished file. Do not keep reopening completed files without a concrete test failure,
@@ -198,10 +199,10 @@ DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
    edit limit and a same-file cooldown; do not try alternate tool calls to bypass it.
 8b. After initial inspection, call set_file_plan with the ordered list of files that truly
    need changes. Do not include unchanged files. This plan persists across interrupted runs.
-8c. Work through the saved plan in order. Mark a file IN_PROGRESS before changing it.
-   After saving, read it back and verify it against requirements, then mark it COMPLETED
-   with a concise verification note. Never edit a COMPLETED file unless a concrete defect
-   is found; first mark it NEEDS_CORRECTION with the exact reason.
+8c. Work through the saved plan strictly in order, one file at a time. Mark the current file
+   IN_PROGRESS before changing it. After typing and saving, read it back and verify it,
+   then immediately mark it COMPLETED. Only then start the next file. Never return to a
+   WRITTEN or COMPLETED file to rewrite it. For a real defect, mark NEEDS_CORRECTION first.
 8d. On resume, continue from the first unfinished file in the saved plan. Do not repeat
    environment inventory, package listing, or full project discovery unless necessary.
 9. Do not make unrelated changes. Preserve existing architecture, naming, formatting, and behavior.
@@ -438,14 +439,15 @@ class CodingAgent:
         for relative in ordered_names:
             prior = old.get(relative, {})
             status = prior.get("status", "NOT_STARTED")
-            if status not in {"NOT_STARTED", "IN_PROGRESS", "COMPLETED", "NEEDS_CORRECTION"}:
+            if status not in {"NOT_STARTED", "IN_PROGRESS", "WRITTEN", "COMPLETED", "NEEDS_CORRECTION"}:
                 status = "NOT_STARTED"
             files[relative] = {"status": status, "verification_or_reason": prior.get("verification_or_reason", "")}
         self.file_manifest = {"task_hash": self.task_hash, "task": self.progress.get("task", "")[:500], "updated_at": datetime.now(timezone.utc).isoformat(), "files": files}
         self._save_manifest()
         done = [name for name, item in files.items() if item["status"] == "COMPLETED"]
         todo = [name for name, item in files.items() if item["status"] != "COMPLETED"]
-        return f"Saved ordered plan with {len(files)} files. Completed: {len(done)}. Remaining in order: {', '.join(todo) or 'none'}. Work only on the first unfinished file."
+        written = [name for name, item in files.items() if item["status"] == "WRITTEN"]
+        return f"Saved ordered plan with {len(files)} files. Completed: {len(done)}. Already written and awaiting completion marking: {', '.join(written) or 'none'}. Remaining in order: {', '.join(todo) or 'none'}. Work only on the first unfinished file; never rewrite a WRITTEN file."
 
     def _update_file_status(self, filename: str, status: str, verification_or_reason: str) -> str:
         try:
@@ -549,6 +551,13 @@ class CodingAgent:
             return f"Write blocked: mark {relative} IN_PROGRESS with update_file_status before editing it."
         if manifest_entry.get("status") == "COMPLETED":
             return f"Edit blocked: {relative} is marked COMPLETED in the persistent plan. If a concrete defect exists, mark it NEEDS_CORRECTION first."
+        if manifest_entry.get("status") == "WRITTEN" and not targeted_edit:
+            return f"Duplicate write blocked: {relative} has already been visibly typed, saved, and verified. Read it back, mark it COMPLETED, then move to the next unfinished file. Do not write it again."
+        ordered = list(manifest_files.items())
+        first_unfinished = next((name for name, item in ordered if item.get("status") != "COMPLETED"), None)
+        if first_unfinished and relative != first_unfinished:
+            return (f"File-order guard: finish {first_unfinished} first. Do not start or repeat {relative} "
+                    "until the earlier planned file is marked COMPLETED.")
         if self._last_successful_file_change == relative:
             return (
                 f"Forward-progress guard: {relative} was just changed successfully. "
@@ -651,7 +660,7 @@ class CodingAgent:
         self._last_written_content[relative] = content
         self._last_successful_file_change = relative
         if relative in self.file_manifest.get("files", {}):
-            self.file_manifest["files"][relative] = {"status": "IN_PROGRESS", "verification_or_reason": "Saved; awaiting explicit implementation verification.", "updated_at": datetime.now(timezone.utc).isoformat()}
+            self.file_manifest["files"][relative] = {"status": "WRITTEN", "verification_or_reason": "Visibly typed, saved, and exact read-back comparison passed; awaiting final requirement review.", "updated_at": datetime.now(timezone.utc).isoformat()}
             self.file_manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
             self._save_manifest()
         if targeted_edit:
@@ -663,7 +672,7 @@ class CodingAgent:
         self.progress["last_completed_file"] = relative
         self._save_progress()
         self.status(f"Completed {relative}. Moving to the next unfinished file.")
-        return f"Successfully typed visibly in VS Code, saved, and verified {relative}. Move to a different unfinished file."
+        return f"Successfully typed visibly in VS Code, saved, and read-back verified {relative}. Do not write it again. Mark it COMPLETED, then move to the next unfinished file."
 
     def _edit_file(self, filename: str, old_text: str, new_text: str) -> str:
         self._check_cancelled()
