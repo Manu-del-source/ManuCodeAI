@@ -304,3 +304,126 @@ class WindowsTypingEngine:
     @classmethod
     def save_document(cls) -> None:
         cls.shortcut(VK_CONTROL, VK_S)
+
+
+
+class LinuxTypingEngine:
+    """Visible Linux keyboard typing using xdotool and the desktop clipboard."""
+
+    def __init__(self, min_delay: float = 0.18, max_delay: float = 0.28,
+                 line_delay_min: float = 1.00, line_delay_max: float = 1.40):
+        self.min_delay = min_delay
+        self.max_delay = max_delay
+        self.line_delay_min = line_delay_min
+        self.line_delay_max = line_delay_max
+        self._random = random.Random()
+        self._clipboard_tool = (
+            "wl-copy" if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy")
+            else "xclip" if shutil.which("xclip")
+            else "xsel" if shutil.which("xsel")
+            else None
+        )
+        if not shutil.which("xdotool"):
+            raise OSError(
+                "Linux visible typing requires xdotool. Install it with your distribution package manager."
+            )
+        if not self._clipboard_tool:
+            raise OSError(
+                "Linux visible typing requires wl-clipboard (Wayland), xclip, or xsel (X11)."
+            )
+
+    def _run(self, args: list[str], *, input_text: str | None = None,
+             capture: bool = False) -> str:
+        result = subprocess.run(
+            args, input=input_text, text=True, capture_output=capture, check=False
+        )
+        if result.returncode:
+            detail = (result.stderr or "").strip()
+            raise OSError(detail or f"Command failed: {' '.join(args)}")
+        return result.stdout if capture else ""
+
+    def _clipboard_get(self) -> str | None:
+        try:
+            if self._clipboard_tool == "wl-copy":
+                return self._run(["wl-paste", "--no-newline"], capture=True)
+            if self._clipboard_tool == "xclip":
+                return self._run(["xclip", "-selection", "clipboard", "-o"], capture=True)
+            return self._run(["xsel", "--clipboard", "--output"], capture=True)
+        except (OSError, FileNotFoundError):
+            return None
+
+    def _clipboard_set(self, value: str) -> None:
+        if self._clipboard_tool == "wl-copy":
+            self._run(["wl-copy", "--type", "text/plain;charset=utf-8"], input_text=value)
+        elif self._clipboard_tool == "xclip":
+            self._run(["xclip", "-selection", "clipboard", "-i"], input_text=value)
+        else:
+            self._run(["xsel", "--clipboard", "--input"], input_text=value)
+
+    @staticmethod
+    def shortcut(*keys: str) -> None:
+        subprocess.run(["xdotool", "key", "--clearmodifiers", "+".join(keys)], check=True)
+
+    @classmethod
+    def replace_current_document(cls) -> None:
+        cls.shortcut("ctrl+a")
+        cls.shortcut("BackSpace")
+
+    @classmethod
+    def save_document(cls) -> None:
+        cls.shortcut("ctrl+s")
+
+    def _paste_clipboard(self) -> None:
+        self.shortcut("ctrl+v")
+
+    def type_text(self, text: str, cancel_event: threading.Event | None = None,
+                  progress_callback=None) -> None:
+        if sys.platform != "linux":
+            raise OSError("LinuxTypingEngine can only run on Linux.")
+        text = text.replace("\\r\\n", "\\n").replace("\\r", "\\n")
+        total = len(text)
+        previous_clipboard = self._clipboard_get()
+        clipboard_changed = False
+        try:
+            for index, character in enumerate(text, start=1):
+                if cancel_event and cancel_event.is_set():
+                    raise TypingCancelled("Typing was stopped by the user.")
+                if character in {"\\n", "\\t"}:
+                    self._clipboard_set(character)
+                    clipboard_changed = True
+                    self._paste_clipboard()
+                else:
+                    self._run(["xdotool", "type", "--clearmodifiers", "--delay", "0", "--", character])
+                if progress_callback and (
+                    character == "\\n" or index % 25 == 0 or index == total
+                ):
+                    progress_callback(index, total)
+                if character == "\\n":
+                    delay = self._random.uniform(self.line_delay_min, self.line_delay_max)
+                else:
+                    delay = self._random.uniform(self.min_delay, self.max_delay)
+                    if character in ",;":
+                        delay += self._random.uniform(0.16, 0.28)
+                    elif character in ".!?":
+                        delay += self._random.uniform(0.22, 0.38)
+                    elif character in "{}[]()":
+                        delay += self._random.uniform(0.06, 0.13)
+                    elif character == " ":
+                        delay += self._random.uniform(0.02, 0.05)
+                if cancel_event:
+                    if cancel_event.wait(delay):
+                        raise TypingCancelled("Typing was stopped by the user.")
+                else:
+                    time.sleep(delay)
+        finally:
+            if clipboard_changed and previous_clipboard is not None:
+                self._clipboard_set(previous_clipboard)
+
+
+def create_typing_engine(**kwargs):
+    """Return the native visible typing backend for the current desktop OS."""
+    if sys.platform == "win32":
+        return WindowsTypingEngine(**kwargs)
+    if sys.platform.startswith("linux"):
+        return LinuxTypingEngine(**kwargs)
+    raise OSError(f"Visible VS Code typing is not supported on {sys.platform}.")
