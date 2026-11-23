@@ -16,6 +16,8 @@ class CodingAgentProgressTests(unittest.TestCase):
         self.workspace = Path(self.temp_dir.name).resolve()
         self.agent = CodingAgent.__new__(CodingAgent)
         self.agent.workspace = self.workspace
+        self.agent.manifest_path = self.workspace / ".manucodeai" / "file_manifest.json"
+        self.agent.progress_path = self.workspace / ".manucodeai" / "progress.json"
         self.agent.cancel_event = threading.Event()
         self.agent.task_hash = "test-task-hash"
         self.agent.progress = {"task": "test task", "completed_files": []}
