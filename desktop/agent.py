@@ -97,7 +97,7 @@ TOOLS = [
                 "old_text snippet and its replacement new_text. The old_text must occur "
                 "exactly once. Prefer this over rewriting an entire existing file. "
                 "After a successful change, move to another unfinished file. Repeated "
-                "edits to the same file are limited by session progress safeguards."
+                "edits to the same file require an explicit NEEDS_CORRECTION transition; saved and verified files are automatically completed by the application."
             ),
             "parameters": {
                 "type": "object",
@@ -128,7 +128,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "set_file_plan",
-            "description": "Persist the ordered list of files that genuinely need implementation for this task. Call once after initial inspection and before coding; preserve the existing ordered plan on resume.",
+            "description": "Persist the ordered list of files that genuinely need implementation for this task. Call once after initial inspection and before coding; preserve the existing ordered plan on resume. The application advances automatically when a file is visibly typed, saved, and verified."
             "parameters": {"type":"object","properties":{"planned_files":{"type":"array","items":{"type":"string"},"minItems":1}},"required":["planned_files"],"additionalProperties":False}
         }
     },
@@ -136,7 +136,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "update_file_status",
-            "description": "Set a planned file to IN_PROGRESS, COMPLETED, or NEEDS_CORRECTION. COMPLETED requires a concrete verification note. Mark NEEDS_CORRECTION before revisiting a completed file.",
+            "description": "Set a planned file to IN_PROGRESS or NEEDS_CORRECTION. The application automatically marks files COMPLETED after exact save/read-back verification; do not manually mark a successful write completed. Mark NEEDS_CORRECTION with a concrete reason before revisiting a completed file.",
             "parameters": {"type":"object","properties":{"filename":{"type":"string"},"status":{"type":"string","enum":["IN_PROGRESS","COMPLETED","NEEDS_CORRECTION"]},"verification_or_reason":{"type":"string"}},"required":["filename","status","verification_or_reason"],"additionalProperties":False}
         }
     },
@@ -201,8 +201,9 @@ DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
    need changes. Do not include unchanged files. This plan persists across interrupted runs.
 8c. Work through the saved plan strictly in order, one file at a time. Mark the current file
    IN_PROGRESS before changing it. After typing and saving, read it back and verify it,
-   then immediately mark it COMPLETED. Only then start the next file. Never return to a
-   WRITTEN or COMPLETED file to rewrite it. For a real defect, mark NEEDS_CORRECTION first.
+   The application automatically marks the file COMPLETED after exact save/read-back
+   verification and advances the queue. Do not issue a second status call to complete it.
+   Never return to a WRITTEN or COMPLETED file. For a real defect, mark NEEDS_CORRECTION first.
 8d. On resume, continue from the first unfinished file in the saved plan. Do not repeat
    environment inventory, package listing, or full project discovery unless necessary.
 9. Do not make unrelated changes. Preserve existing architecture, naming, formatting, and behavior.
