@@ -9,7 +9,7 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
-from .typing_engine import WindowsTypingEngine
+from .typing_engine import create_typing_engine
 
 
 class VSCodeError(RuntimeError):
@@ -19,7 +19,7 @@ class VSCodeError(RuntimeError):
 class VSCodeController:
     def __init__(self):
         # Keep one typing engine for the session so its natural timing stays consistent.
-        self.typing_engine = WindowsTypingEngine(
+        self.typing_engine = create_typing_engine(
             min_delay=0.18,
             max_delay=0.28,
             line_delay_min=1.00,
@@ -47,8 +47,43 @@ class VSCodeController:
     @staticmethod
     def _focus_editor(filename: str, cancel_event: threading.Event | None = None) -> None:
         """Wait for the requested VS Code tab/window and explicitly focus it."""
+        if sys.platform.startswith("linux"):
+            target_name = Path(filename).name
+            deadline = time.monotonic() + 20.0
+            if not shutil.which("xdotool"):
+                raise VSCodeError("Linux editor focus requires xdotool. Install it and retry.")
+            while time.monotonic() < deadline:
+                if cancel_event and cancel_event.is_set():
+                    raise VSCodeError("Typing cancelled while waiting for VS Code.")
+                try:
+                    found = subprocess.run(
+                        ["xdotool", "search", "--onlyvisible", "--name", target_name],
+                        capture_output=True, text=True, check=False,
+                    )
+                    window_ids = [item for item in found.stdout.splitlines() if item.strip()]
+                    if found.returncode == 0 and window_ids:
+                        activated = subprocess.run(
+                            ["xdotool", "windowactivate", "--sync", window_ids[-1]],
+                            capture_output=True, text=True, check=False,
+                        )
+                        if activated.returncode == 0:
+                            time.sleep(0.25)
+                            return
+                except OSError:
+                    pass
+                time.sleep(0.25)
+            session = os.environ.get("XDG_SESSION_TYPE", "unknown")
+            hint = (
+                "On Wayland, your compositor may block programmatic window activation. "
+                "Bring the requested VS Code tab to the foreground and retry."
+                if session.lower() == "wayland"
+                else "Check that VS Code is open and the xdotool window search can see it."
+            )
+            raise VSCodeError(
+                f"Could not focus {target_name} in VS Code. No keyboard input was sent. {hint}"
+            )
         if not hasattr(ctypes, "windll"):
-            raise VSCodeError("Visible editor typing is supported on Windows only.")
+            raise VSCodeError("Visible editor typing is supported on Windows and Linux only.")
         user32 = ctypes.windll.user32
         target_name = Path(filename).name.lower()
         deadline = time.monotonic() + 20.0
