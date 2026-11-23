@@ -31,7 +31,7 @@ python -m pip install -r requirements.txt
 python -m desktop.app
 ```
 
-For Wayland, install `xdotool` and `wl-clipboard` (`wl-copy` and `wl-paste`). Some Wayland compositors restrict programmatic window activation; if ManuCodeAI cannot confirm VS Code focus, bring the requested VS Code tab to the foreground and retry. ManuCodeAI will not send keyboard input when it cannot confirm focus.
+For a Wayland session, install `xdotool` and `wl-clipboard` (`wl-copy` and `wl-paste`). VS Code must be exposed through XWayland for the current focus-detection backend to activate and confirm its window. A native-Wayland VS Code window may not be visible to `xdotool`; in that case the current build will stop safely rather than send keystrokes to an unverified window.
 
 The Windows backend uses native keyboard input. The Linux backend uses `xdotool` and the session clipboard. Both retain the same adjustable natural typing delays and literal newline/tab insertion.
 
