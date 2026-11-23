@@ -93,7 +93,9 @@ TOOLS = [
             "description": (
                 "Make a targeted edit to an existing project text file. Provide an exact "
                 "old_text snippet and its replacement new_text. The old_text must occur "
-                "exactly once. Prefer this over rewriting an entire existing file."
+                "exactly once. Prefer this over rewriting an entire existing file. "
+                "After a successful change, move to another unfinished file. Repeated "
+                "edits to the same file are limited by session progress safeguards."
             ),
             "parameters": {
                 "type": "object",
@@ -173,6 +175,13 @@ DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
    unfinished file. Do not keep reopening completed files without a concrete test failure,
    syntax error, or unmet requirement. If a correction is necessary, read the latest version
    and use one targeted edit, then rerun the relevant check.
+8a. Never make consecutive successful changes to the same file. After a successful write
+   or edit, immediately move to a different unfinished file. The tools enforce a per-file
+   edit limit and a same-file cooldown; do not try alternate tool calls to bypass it.
+8b. Keep an explicit checklist with statuses NOT STARTED, IN PROGRESS, and COMPLETED.
+   Mark a file COMPLETED after its intended implementation is saved and verified. Do not
+   keep selecting COMPLETED files; choose the next NOT STARTED file. Revisit a completed
+   file only when a concrete verification failure requires a correction.
 9. Do not make unrelated changes. Preserve existing architecture, naming, formatting, and behavior.
 10. After implementation, run focused syntax checks and relevant tests/build/lint commands.
     Review the output. Fix actual failures with targeted edits, then rerun the failed checks.
@@ -259,6 +268,9 @@ class CodingAgent:
         # Enforce forward progress: a file gets at most one successful full write
         # per session. Later corrections must use the targeted edit_file tool.
         self._full_write_success: set[str] = set()
+        self._successful_edits: dict[str, int] = {}
+        self._last_successful_file_change: str | None = None
+        self._completed_files: set[str] = set()
         self.implementation_complete = False
         self.progress_path = self.workspace / ".manucodeai" / PROGRESS_FILENAME
         self.progress: dict = {}
@@ -323,6 +335,8 @@ class CodingAgent:
             self.progress = previous
             self.progress["status"] = "running"
             self.implementation_complete = bool(previous.get("implementation_complete", False))
+            self._completed_files = set(previous.get("completed_files", []))
+            self._successful_edits = dict(previous.get("successful_edits", {}))
             self.progress["resumed_at"] = datetime.now(timezone.utc).isoformat()
             recent = previous.get("events", [])[-30:]
             summary = "\n".join(
@@ -349,6 +363,8 @@ class CodingAgent:
             "started_at": datetime.now(timezone.utc).isoformat(),
             "last_round": 0,
             "implementation_complete": False,
+            "completed_files": [],
+            "successful_edits": {},
             "events": [],
         }
         self._save_progress()
@@ -418,6 +434,18 @@ class CodingAgent:
         self._check_cancelled()
         path = self._safe_path(filename)
         relative = path.relative_to(self.workspace).as_posix()
+        if self._last_successful_file_change == relative:
+            return (
+                f"Forward-progress guard: {relative} was just changed successfully. "
+                "Move to a different unfinished file before making another change here. "
+                "Do not retry this file; select the next file in your implementation checklist."
+            )
+        if targeted_edit and self._successful_edits.get(relative, 0) >= 2:
+            return (
+                f"Edit limit reached for {relative}: two targeted edits have already succeeded "
+                "in this session. Move to another unfinished file. Revisit only after a concrete "
+                "test failure is identified during the final verification phase."
+            )
         if relative in self._full_write_success and not targeted_edit:
             return (
                 f"Full write blocked for {relative}: this file has already been written "
@@ -485,9 +513,18 @@ class CodingAgent:
                 )
         self._read_since_write.discard(relative)
         self._last_written_content[relative] = content
-        if not targeted_edit:
+        self._last_successful_file_change = relative
+        self._completed_files.add(relative)
+        if targeted_edit:
+            self._successful_edits[relative] = self._successful_edits.get(relative, 0) + 1
+        else:
             self._full_write_success.add(relative)
-        return f"Successfully typed, saved, and verified {relative}."
+        self.progress["completed_files"] = sorted(self._completed_files)
+        self.progress["successful_edits"] = self._successful_edits
+        self.progress["last_completed_file"] = relative
+        self._save_progress()
+        self.status(f"Completed {relative}. Moving to the next unfinished file.")
+        return f"Successfully typed, saved, and verified {relative}. This file is marked completed; move to a different unfinished file."
 
     def _edit_file(self, filename: str, old_text: str, new_text: str) -> str:
         self._check_cancelled()
