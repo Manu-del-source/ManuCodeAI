@@ -547,14 +547,14 @@ class CodingAgent:
     def _run_command(self, command: str) -> str:
         self._check_cancelled()
         gated_patterns = (
-            r"\\buvicorn\\b",
-            r"\\bpytest\\b",
-            r"\\bpython\\s+-m\\s+unittest\\b",
-            r"\\bmanage\\.py\\s+test\\b",
-            r"\\b(?:npm|pnpm|yarn)\\s+(?:run\\s+)?(?:test|e2e|integration)\\b",
-            r"\\b(?:npm|pnpm|yarn)\\s+run\\s+(?:dev|start)\\b",
-            r"\\bflask\\s+run\\b",
-            r"\\b(?:django-admin|python\\s+-m\\s+http\\.server)\\b",
+            r"\buvicorn\b",
+            r"\bpytest\b",
+            r"\bpython\s+-m\s+unittest\b",
+            r"\bmanage\.py\s+test\b",
+            r"\b(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:test|e2e|integration)\b",
+            r"\b(?:npm|pnpm|yarn)\s+run\s+(?:dev|start)\b",
+            r"\bflask\s+run\b",
+            r"\b(?:django-admin|python\s+-m\s+http\.server)\b",
         )
         if not self.implementation_complete and any(
             re.search(pattern, command, re.IGNORECASE) for pattern in gated_patterns
