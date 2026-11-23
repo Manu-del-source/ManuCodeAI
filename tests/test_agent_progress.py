@@ -60,6 +60,30 @@ class CodingAgentProgressTests(unittest.TestCase):
 
         self.assertIn("marked COMPLETED", result)
 
+    def test_completed_file_cannot_be_edited_again(self):
+        target = self.workspace / "src" / "first.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("print('already done')\\n", encoding="utf-8")
+        self.agent.file_manifest["files"] = {
+            "src/first.py": {"status": "COMPLETED"}
+        }
+
+        result = self.agent._edit_file(
+            "src/first.py", "already done", "duplicate change"
+        )
+
+        self.assertIn("first transition it to NEEDS_CORRECTION", result)
+
+    def test_later_file_cannot_skip_first_unfinished_file(self):
+        self.agent.file_manifest["files"] = {
+            "src/first.py": {"status": "IN_PROGRESS"},
+            "src/second.py": {"status": "IN_PROGRESS"},
+        }
+
+        result = self.agent._write_file("src/second.py", "print('skip')")
+
+        self.assertIn("finish src/first.py first", result)
+
     def test_completion_gate_detects_file_changed_after_verification(self):
         target = self.workspace / "src" / "first.py"
         target.parent.mkdir(parents=True)
