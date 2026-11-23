@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -36,6 +37,7 @@ except ValueError:
     MAX_AGENT_ROUNDS = 60
 CONTINUATION_INTERVAL = 12
 PROGRESS_FILENAME = "progress.json"
+MANIFEST_FILENAME = "file_manifest.json"
 
 
 TOOLS = [
@@ -125,6 +127,22 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "set_file_plan",
+            "description": "Persist the ordered list of files that genuinely need implementation for this task. Call after initial inspection and before coding.",
+            "parameters": {"type":"object","properties":{"planned_files":{"type":"array","items":{"type":"string"},"minItems":1}},"required":["planned_files"],"additionalProperties":False}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_file_status",
+            "description": "Set a planned file to IN_PROGRESS, COMPLETED, or NEEDS_CORRECTION. COMPLETED requires a concrete verification note. Mark NEEDS_CORRECTION before revisiting a completed file.",
+            "parameters": {"type":"object","properties":{"filename":{"type":"string"},"status":{"type":"string","enum":["IN_PROGRESS","COMPLETED","NEEDS_CORRECTION"]},"verification_or_reason":{"type":"string"}},"required":["filename","status","verification_or_reason"],"additionalProperties":False}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "complete_implementation",
             "description": "Call this only after every planned source, configuration, and frontend/backend code file has been created or updated. Supply the complete list of planned files. The tool verifies that every listed file exists, then unlocks application startup and integration testing.",
             "parameters": {
@@ -178,10 +196,14 @@ DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
 8a. Never make consecutive successful changes to the same file. After a successful write
    or edit, immediately move to a different unfinished file. The tools enforce a per-file
    edit limit and a same-file cooldown; do not try alternate tool calls to bypass it.
-8b. Keep an explicit checklist with statuses NOT STARTED, IN PROGRESS, and COMPLETED.
-   Mark a file COMPLETED after its intended implementation is saved and verified. Do not
-   keep selecting COMPLETED files; choose the next NOT STARTED file. Revisit a completed
-   file only when a concrete verification failure requires a correction.
+8b. After initial inspection, call set_file_plan with the ordered list of files that truly
+   need changes. Do not include unchanged files. This plan persists across interrupted runs.
+8c. Work through the saved plan in order. Mark a file IN_PROGRESS before changing it.
+   After saving, read it back and verify it against requirements, then mark it COMPLETED
+   with a concise verification note. Never edit a COMPLETED file unless a concrete defect
+   is found; first mark it NEEDS_CORRECTION with the exact reason.
+8d. On resume, continue from the first unfinished file in the saved plan. Do not repeat
+   environment inventory, package listing, or full project discovery unless necessary.
 9. Do not make unrelated changes. Preserve existing architecture, naming, formatting, and behavior.
 10. After implementation, run focused syntax checks and relevant tests/build/lint commands.
     Review the output. Fix actual failures with targeted edits, then rerun the failed checks.
@@ -271,6 +293,9 @@ class CodingAgent:
         self._successful_edits: dict[str, int] = {}
         self._last_successful_file_change: str | None = None
         self._completed_files: set[str] = set()
+        self.manifest_path = self.workspace / ".manucodeai" / MANIFEST_FILENAME
+        self.file_manifest: dict = {}
+        self.task_hash = ""
         self.implementation_complete = False
         self.progress_path = self.workspace / ".manucodeai" / PROGRESS_FILENAME
         self.progress: dict = {}
@@ -331,11 +356,22 @@ class CodingAgent:
         except (OSError, ValueError):
             previous = {}
 
+        self.task_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        try:
+            saved_manifest = json.loads(self.manifest_path.read_text(encoding="utf-8")) if self.manifest_path.is_file() else {}
+        except (OSError, ValueError):
+            saved_manifest = {}
+        if saved_manifest.get("task_hash") == self.task_hash:
+            self.file_manifest = saved_manifest
+        else:
+            self.file_manifest = {"task_hash": self.task_hash, "task": prompt[:500], "files": {}}
+            self._save_manifest()
+
         if previous.get("task") == prompt and previous.get("status") in {"running", "paused"}:
             self.progress = previous
             self.progress["status"] = "running"
             self.implementation_complete = bool(previous.get("implementation_complete", False))
-            self._completed_files = set(previous.get("completed_files", []))
+            self._completed_files = {name for name, item in self.file_manifest.get("files", {}).items() if item.get("status") == "COMPLETED"}
             self._successful_edits = dict(previous.get("successful_edits", {}))
             self.progress["resumed_at"] = datetime.now(timezone.utc).isoformat()
             recent = previous.get("events", [])[-30:]
@@ -355,6 +391,7 @@ class CodingAgent:
                 + summary
             )
 
+        self._completed_files = {name for name, item in self.file_manifest.get("files", {}).items() if item.get("status") == "COMPLETED"}
         self.progress = {
             "task": prompt,
             "status": "running",
@@ -368,7 +405,71 @@ class CodingAgent:
             "events": [],
         }
         self._save_progress()
+        completed = [name for name, item in self.file_manifest.get("files", {}).items() if item.get("status") == "COMPLETED"]
+        if completed:
+            return prompt + "\n\nPERSISTED FILE PLAN: Already verified and completed for this exact task: " + ", ".join(completed) + ". Do not rediscover or rewrite these files. Continue only with unfinished planned files."
         return prompt
+
+    def _save_manifest(self) -> None:
+        try:
+            self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.manifest_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.file_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(self.manifest_path)
+        except OSError as error:
+            self.status(f"Could not save file manifest: {error}")
+
+    def _set_file_plan(self, planned_files: list[str]) -> str:
+        normalized = []
+        for filename in planned_files:
+            try:
+                path = self._safe_path(filename)
+            except (ValueError, OSError) as error:
+                return f"Rejected file plan entry {filename}: {error}"
+            relative = path.relative_to(self.workspace).as_posix()
+            if relative not in normalized:
+                normalized.append(relative)
+        old = self.file_manifest.get("files", {})
+        files = {}
+        for relative in normalized:
+            prior = old.get(relative, {})
+            status = prior.get("status", "NOT_STARTED")
+            if status not in {"NOT_STARTED", "IN_PROGRESS", "COMPLETED", "NEEDS_CORRECTION"}:
+                status = "NOT_STARTED"
+            files[relative] = {"status": status, "verification_or_reason": prior.get("verification_or_reason", "")}
+        self.file_manifest = {"task_hash": self.task_hash, "task": self.progress.get("task", "")[:500], "updated_at": datetime.now(timezone.utc).isoformat(), "files": files}
+        self._save_manifest()
+        done = [name for name, item in files.items() if item["status"] == "COMPLETED"]
+        todo = [name for name, item in files.items() if item["status"] != "COMPLETED"]
+        return f"Saved ordered plan with {len(files)} files. Completed: {len(done)}. Remaining in order: {', '.join(todo) or 'none'}. Work only on the first unfinished file."
+
+    def _update_file_status(self, filename: str, status: str, verification_or_reason: str) -> str:
+        try:
+            path = self._safe_path(filename)
+        except (ValueError, OSError) as error:
+            return f"Status update rejected: {error}"
+        relative = path.relative_to(self.workspace).as_posix()
+        files = self.file_manifest.get("files", {})
+        if relative not in files:
+            return f"Status update rejected: {relative} is not in the file plan."
+        if not verification_or_reason.strip():
+            return "Status update rejected: include a verification note or concrete correction reason."
+        if status == "COMPLETED":
+            if not path.is_file() or path.stat().st_size == 0:
+                return f"Cannot mark {relative} COMPLETED: file is missing or empty."
+            try:
+                path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as error:
+                return f"Cannot mark {relative} COMPLETED: {error}"
+            self._completed_files.add(relative)
+        elif status == "NEEDS_CORRECTION":
+            self._completed_files.discard(relative)
+        files[relative] = {"status": status, "verification_or_reason": verification_or_reason.strip()[:1000], "updated_at": datetime.now(timezone.utc).isoformat()}
+        self.file_manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self._save_manifest()
+        self.progress["completed_files"] = sorted(self._completed_files)
+        self._save_progress()
+        return f"{relative} is now {status}. " + ("Move to the next unfinished file." if status == "COMPLETED" else "Address only the recorded reason.")
 
     def _safe_path(self, filename: str) -> Path:
         path = (self.workspace / filename).resolve()
@@ -434,6 +535,9 @@ class CodingAgent:
         self._check_cancelled()
         path = self._safe_path(filename)
         relative = path.relative_to(self.workspace).as_posix()
+        manifest_entry = self.file_manifest.get("files", {}).get(relative, {})
+        if manifest_entry.get("status") == "COMPLETED":
+            return f"Edit blocked: {relative} is marked COMPLETED in the persistent plan. If a concrete defect exists, mark it NEEDS_CORRECTION first."
         if self._last_successful_file_change == relative:
             return (
                 f"Forward-progress guard: {relative} was just changed successfully. "
@@ -514,7 +618,10 @@ class CodingAgent:
         self._read_since_write.discard(relative)
         self._last_written_content[relative] = content
         self._last_successful_file_change = relative
-        self._completed_files.add(relative)
+        if relative in self.file_manifest.get("files", {}):
+            self.file_manifest["files"][relative] = {"status": "IN_PROGRESS", "verification_or_reason": "Saved; awaiting explicit implementation verification.", "updated_at": datetime.now(timezone.utc).isoformat()}
+            self.file_manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._save_manifest()
         if targeted_edit:
             self._successful_edits[relative] = self._successful_edits.get(relative, 0) + 1
         else:
@@ -646,6 +753,10 @@ class CodingAgent:
                 return self._edit_file(**arguments)
             if name == "run_command":
                 return self._run_command(**arguments)
+            if name == "set_file_plan":
+                return self._set_file_plan(**arguments)
+            if name == "update_file_status":
+                return self._update_file_status(**arguments)
             if name == "complete_implementation":
                 return self._complete_implementation(**arguments)
             return f"Unknown tool: {name}"
