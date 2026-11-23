@@ -64,7 +64,7 @@ class AgentWorker(QThread):
         kill_switch = KeyboardKillSwitch(self.cancel_event, self.status.emit)
         try:
             if kill_switch.start():
-                self.status.emit("Keyboard emergency stop active: press Ctrl+Alt+F12 at any time.")
+                self.status.emit("Keyboard emergency stop active: press Ctrl+Shift+X at any time.")
             else:
                 self.status.emit(
                     f"Keyboard emergency stop unavailable: {kill_switch.error}. "
