@@ -75,7 +75,7 @@ TOOLS = [
                 "Create a new project text file autonomously. For an existing file, prefer "
                 "edit_file with a precise old_text/new_text replacement. A successful full "
                 "write may not be repeated in the same session; use edit_file for corrections. "
-                "The app types the content visibly into VS Code."
+                "The app writes the exact content atomically to disk, verifies it, then opens the saved file in VS Code."
             ),
             "parameters": {
                 "type": "object",
@@ -173,7 +173,7 @@ ANTHROPIC_TOOLS = [
 SYSTEM_PROMPT = """You are ManuCodeAI, a fully autonomous software engineering agent.
 
 You operate on the project folder selected by the user in the ManuCodeAI desktop
-application. Visual Studio Code is only the editor where code changes are shown.
+application. Visual Studio Code is only the editor where saved code changes are shown. File contents are written directly and atomically to disk; never use simulated keyboard typing to write source files.
 There is no ManuCodeAI VS Code extension and no chat interface inside VS Code.
 
 DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
@@ -182,7 +182,7 @@ DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
 3. Before coding, form a short internal plan: list the intended files, the purpose of each change,
    and how you will verify it. Do not send a separate planning-only response; continue working.
 4. Implement one logical change at a time. Finish and verify that change before moving to the next.
-5. For a new file, use write_file once with the complete initial content.
+5. For a new file, use write_file once with the complete initial content. The tool replaces the file atomically on disk and opens it in VS Code only after the disk write succeeds.
 6. For an existing file, prefer edit_file with a small, exact old_text/new_text replacement.
    Use write_file for an existing file only when a substantial rewrite is genuinely necessary.
 7. Never call write_file or edit_file repeatedly with the same content. Do not rewrite a file
@@ -595,14 +595,35 @@ class CodingAgent:
                 self.status(f"Python validation failed: {relative} — {error.msg} ({location})")
                 return detail
 
+        # Reject malformed JSON, trailing duplicate documents, and duplicate object
+        # keys before touching the existing file. json.loads also rejects extra
+        # content after the first complete JSON value (e.g. two pasted objects).
+        if path.suffix.lower() == ".json":
+            def reject_duplicate_keys(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError(f"Duplicate JSON key: {key!r}")
+                    result[key] = value
+                return result
+            try:
+                json.loads(content, object_pairs_hook=reject_duplicate_keys)
+                self.status(f"JSON preflight passed: {relative}.")
+            except (json.JSONDecodeError, ValueError) as error:
+                detail = (
+                    f"JSON validation failed for {relative}: {error}. "
+                    "The file was NOT changed. Provide one complete valid JSON document, "
+                    "remove duplicate keys or trailing duplicate content, and retry."
+                )
+                self.status(f"JSON validation failed: {relative} — {error}")
+                return detail
+
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.status(f"Writing {relative} automatically...")
+        self.status(f"Writing {relative} atomically to disk...")
         self._check_cancelled()
-        self.vscode.write_file_visibly(
+        self.vscode.write_file_and_open(
             self.workspace, relative, content, cancel_event=self.cancel_event,
-            progress_callback=lambda current, total: self.status(
-                f"Typing {relative}: {current}/{total} characters"
-            ),
+            progress_callback=None,
         )
         self._check_cancelled()
         try:
@@ -642,7 +663,7 @@ class CodingAgent:
         self.progress["last_completed_file"] = relative
         self._save_progress()
         self.status(f"Completed {relative}. Moving to the next unfinished file.")
-        return f"Successfully typed, saved, and verified {relative}. This file is marked completed; move to a different unfinished file."
+        return f"Successfully written atomically, reopened, and verified {relative}. Move to a different unfinished file."
 
     def _edit_file(self, filename: str, old_text: str, new_text: str) -> str:
         self._check_cancelled()
