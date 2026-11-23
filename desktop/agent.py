@@ -375,7 +375,12 @@ class CodingAgent:
                     actual_digest = hashlib.sha256(self._safe_path(relative).read_bytes()).hexdigest()
                 except (OSError, ValueError):
                     actual_digest = ""
-                if not expected_digest or actual_digest != expected_digest:
+                if not expected_digest:
+                    # Older manifests predate content fingerprints. Preserve the
+                    # saved file and require read-back review rather than rewriting it.
+                    item["status"] = "WRITTEN"
+                    item["verification_or_reason"] = "Legacy saved file: read and verify current content before marking complete."
+                elif actual_digest != expected_digest:
                     item["status"] = "NEEDS_CORRECTION"
                     item["verification_or_reason"] = "Saved file differs from the last verified content; inspect before making a targeted correction."
             self._save_manifest()
@@ -490,8 +495,10 @@ class CodingAgent:
             prior = files[relative]
             if prior.get("status") == "WRITTEN":
                 expected = prior.get("verified_sha256")
-                if not expected or hashlib.sha256(saved).hexdigest() != expected:
+                if expected and hashlib.sha256(saved).hexdigest() != expected:
                     return f"Cannot mark {relative} COMPLETED: its saved content no longer matches the verified write."
+                if not expected and relative not in self._read_since_write:
+                    return f"Cannot mark {relative} COMPLETED: read the legacy saved file first."
             elif relative not in self._read_since_write:
                 return f"Cannot mark {relative} COMPLETED: read the current file first and verify it against the task."
             self._completed_files.add(relative)
