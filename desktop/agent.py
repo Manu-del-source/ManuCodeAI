@@ -466,7 +466,12 @@ class CodingAgent:
             status = prior.get("status", "NOT_STARTED")
             if status not in {"NOT_STARTED", "IN_PROGRESS", "WRITTEN", "COMPLETED", "NEEDS_CORRECTION"}:
                 status = "NOT_STARTED"
-            files[relative] = {"status": status, "verification_or_reason": prior.get("verification_or_reason", "")}
+            files[relative] = {
+                "status": status,
+                "verification_or_reason": prior.get("verification_or_reason", ""),
+                **({"verified_sha256": prior["verified_sha256"]} if prior.get("verified_sha256") else {}),
+                **({"updated_at": prior["updated_at"]} if prior.get("updated_at") else {}),
+            }
         self.file_manifest = {"task_hash": self.task_hash, "task": self.progress.get("task", "")[:500], "updated_at": datetime.now(timezone.utc).isoformat(), "files": files}
         self._save_manifest()
         done = [name for name, item in files.items() if item["status"] == "COMPLETED"]
