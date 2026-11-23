@@ -63,7 +63,7 @@ class CodingAgentProgressTests(unittest.TestCase):
     def test_completed_file_cannot_be_edited_again(self):
         target = self.workspace / "src" / "first.py"
         target.parent.mkdir(parents=True)
-        target.write_text("print('already done')\\n", encoding="utf-8")
+        target.write_text("print('already done')\n", encoding="utf-8")
         self.agent.file_manifest["files"] = {
             "src/first.py": {"status": "COMPLETED"}
         }
