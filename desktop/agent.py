@@ -629,14 +629,14 @@ class CodingAgent:
         try:
             saved_content = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as error:
-            return f"File was typed but could not be verified after saving: {error}"
+            return f"File was written but could not be verified after saving: {error}"
         expected = content.replace("\r\n", "\n").replace("\r", "\n")
         actual = saved_content.replace("\r\n", "\n").replace("\r", "\n")
         if actual != expected:
             return (
                 f"Post-save verification failed for {relative}: the saved file differs "
                 "from the requested content. Do not report this write as successful. "
-                "Inspect the editor/typing issue and retry."
+                "Inspect the saved file and retry with corrected content."
             )
         if path.suffix.lower() == ".py":
             try:
