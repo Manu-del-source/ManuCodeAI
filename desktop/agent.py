@@ -364,6 +364,20 @@ class CodingAgent:
             saved_manifest = {}
         if saved_manifest.get("task_hash") == self.task_hash:
             self.file_manifest = saved_manifest
+            # Reconcile persisted completion against the actual workspace. A file
+            # changed outside ManuCodeAI is no longer considered completed.
+            for relative, item in self.file_manifest.get("files", {}).items():
+                if item.get("status") != "COMPLETED":
+                    continue
+                expected_digest = item.get("verified_sha256")
+                try:
+                    actual_digest = hashlib.sha256(self._safe_path(relative).read_bytes()).hexdigest()
+                except (OSError, ValueError):
+                    actual_digest = ""
+                if not expected_digest or actual_digest != expected_digest:
+                    item["status"] = "NEEDS_CORRECTION"
+                    item["verification_or_reason"] = "Saved file differs from the last verified content; inspect before making a targeted correction."
+            self._save_manifest()
         else:
             self.file_manifest = {"task_hash": self.task_hash, "task": prompt[:500], "files": {}}
             self._save_manifest()
@@ -468,13 +482,30 @@ class CodingAgent:
             if not path.is_file() or path.stat().st_size == 0:
                 return f"Cannot mark {relative} COMPLETED: file is missing or empty."
             try:
-                path.read_text(encoding="utf-8")
+                saved = path.read_bytes()
+                saved.decode("utf-8")
             except (OSError, UnicodeDecodeError) as error:
                 return f"Cannot mark {relative} COMPLETED: {error}"
+            prior = files[relative]
+            if prior.get("status") == "WRITTEN":
+                expected = prior.get("verified_sha256")
+                if not expected or hashlib.sha256(saved).hexdigest() != expected:
+                    return f"Cannot mark {relative} COMPLETED: its saved content no longer matches the verified write."
+            elif relative not in self._read_since_write:
+                return f"Cannot mark {relative} COMPLETED: read the current file first and verify it against the task."
             self._completed_files.add(relative)
         elif status == "NEEDS_CORRECTION":
             self._completed_files.discard(relative)
-        files[relative] = {"status": status, "verification_or_reason": verification_or_reason.strip()[:1000], "updated_at": datetime.now(timezone.utc).isoformat()}
+            # An explicit correction transition re-opens this file's same-session
+            # guard. It does not permit edits to a later file out of order.
+            if self._last_successful_file_change == relative:
+                self._last_successful_file_change = None
+        files[relative] = {
+            "status": status,
+            "verification_or_reason": verification_or_reason.strip()[:1000],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            **({"verified_sha256": hashlib.sha256(path.read_bytes()).hexdigest()} if status == "COMPLETED" else {}),
+        }
         self.file_manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
         self._save_manifest()
         self.progress["completed_files"] = sorted(self._completed_files)
@@ -555,8 +586,8 @@ class CodingAgent:
             return f"Write blocked: mark {relative} IN_PROGRESS with update_file_status before editing it."
         if manifest_entry.get("status") == "COMPLETED":
             return f"Edit blocked: {relative} is marked COMPLETED in the persistent plan. If a concrete defect exists, mark it NEEDS_CORRECTION first."
-        if manifest_entry.get("status") == "WRITTEN" and not targeted_edit:
-            return f"Duplicate write blocked: {relative} has already been visibly typed, saved, and verified. Read it back, mark it COMPLETED, then move to the next unfinished file. Do not write it again."
+        if manifest_entry.get("status") == "WRITTEN":
+            return f"Change blocked: {relative} has already been visibly typed, saved, and read-back verified. Do not rewrite or edit it. If a concrete defect is found, first mark it NEEDS_CORRECTION with the reason, then make one targeted correction."
         ordered = list(manifest_files.items())
         first_unfinished = next((name for name, item in ordered if item.get("status") != "COMPLETED"), None)
         if first_unfinished and relative != first_unfinished:
@@ -663,9 +694,16 @@ class CodingAgent:
         self._read_since_write.discard(relative)
         self._last_written_content[relative] = content
         self._last_successful_file_change = relative
+        verified_digest = hashlib.sha256(saved_content.encode("utf-8")).hexdigest()
         if relative in self.file_manifest.get("files", {}):
-            self.file_manifest["files"][relative] = {"status": "WRITTEN", "verification_or_reason": "Visibly typed, saved, and exact read-back comparison passed; awaiting final requirement review.", "updated_at": datetime.now(timezone.utc).isoformat()}
+            self.file_manifest["files"][relative] = {
+                "status": "COMPLETED",
+                "verification_or_reason": "Application verified exact saved content against the requested content.",
+                "verified_sha256": verified_digest,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
             self.file_manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._completed_files.add(relative)
             self._save_manifest()
         if targeted_edit:
             self._successful_edits[relative] = self._successful_edits.get(relative, 0) + 1
@@ -674,14 +712,32 @@ class CodingAgent:
         self.progress["completed_files"] = sorted(self._completed_files)
         self.progress["successful_edits"] = self._successful_edits
         self.progress["last_completed_file"] = relative
+        self.progress["next_file"] = next(
+            (name for name, item in self.file_manifest.get("files", {}).items()
+             if item.get("status") != "COMPLETED"),
+            None,
+        )
         self._save_progress()
-        self.status(f"Completed {relative}. Moving to the next unfinished file.")
-        return f"Successfully typed visibly in VS Code, saved, and read-back verified {relative}. Do not write it again. Mark it COMPLETED, then move to the next unfinished file."
+        next_file = self.progress["next_file"]
+        self.status(f"Verified and completed {relative}. " + (f"Next file: {next_file}." if next_file else "All planned files are complete."))
+        return (
+            f"Successfully typed visibly in VS Code, saved, and read-back verified {relative}. "
+            + (f"The application has marked it COMPLETED and advanced the queue to {next_file}. " if next_file else "The application has marked it COMPLETED; all planned files are complete. ")
+            + "Do not call update_file_status for this file or write it again."
+        )
 
     def _edit_file(self, filename: str, old_text: str, new_text: str) -> str:
         self._check_cancelled()
         path = self._safe_path(filename)
         relative = path.relative_to(self.workspace).as_posix()
+        manifest_entry = self.file_manifest.get("files", {}).get(relative)
+        if manifest_entry is None:
+            return f"Cannot edit {relative}: it is not in the persisted file plan."
+        if manifest_entry.get("status") in {"WRITTEN", "COMPLETED"}:
+            return (
+                f"Cannot edit {relative}: its current state is {manifest_entry.get('status')}. "
+                "For a genuine defect, first transition it to NEEDS_CORRECTION with a concrete reason."
+            )
         if not path.is_file():
             return f"Cannot edit {relative}: file does not exist. Use write_file to create a new file."
         try:
