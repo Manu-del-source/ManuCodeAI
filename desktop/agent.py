@@ -111,11 +111,30 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_command",
-            "description": "Run a project command autonomously in the selected project directory using PowerShell on Windows.",
+            "description": "Run a project command autonomously in the selected project directory using PowerShell on Windows. Application startup and integration tests are blocked until complete_implementation succeeds.",
             "parameters": {
                 "type": "object",
                 "properties": {"command": {"type": "string"}},
                 "required": ["command"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "complete_implementation",
+            "description": "Call this only after every planned source, configuration, and frontend/backend code file has been created or updated. Supply the complete list of planned files. The tool verifies that every listed file exists, then unlocks application startup and integration testing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "planned_files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1
+                    }
+                },
+                "required": ["planned_files"],
                 "additionalProperties": False,
             },
         },
@@ -240,6 +259,7 @@ class CodingAgent:
         # Enforce forward progress: a file gets at most one successful full write
         # per session. Later corrections must use the targeted edit_file tool.
         self._full_write_success: set[str] = set()
+        self.implementation_complete = False
         self.progress_path = self.workspace / ".manucodeai" / PROGRESS_FILENAME
         self.progress: dict = {}
         if provider == "Coarena":
@@ -302,6 +322,7 @@ class CodingAgent:
         if previous.get("task") == prompt and previous.get("status") in {"running", "paused"}:
             self.progress = previous
             self.progress["status"] = "running"
+            self.implementation_complete = bool(previous.get("implementation_complete", False))
             self.progress["resumed_at"] = datetime.now(timezone.utc).isoformat()
             recent = previous.get("events", [])[-30:]
             summary = "\n".join(
@@ -327,6 +348,7 @@ class CodingAgent:
             "model": self.model,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "last_round": 0,
+            "implementation_complete": False,
             "events": [],
         }
         self._save_progress()
@@ -490,8 +512,59 @@ class CodingAgent:
         self._read_since_write.add(relative)
         return self._write_file(relative, updated, targeted_edit=True)
 
+    def _complete_implementation(self, planned_files: list[str]) -> str:
+        self._check_cancelled()
+        if not planned_files:
+            return "Implementation gate remains locked: provide the complete planned file list."
+        missing = []
+        invalid = []
+        for filename in planned_files:
+            try:
+                path = self._safe_path(filename)
+            except (ValueError, OSError):
+                invalid.append(str(filename))
+                continue
+            if not path.is_file() or path.stat().st_size == 0:
+                missing.append(str(filename))
+        if invalid or missing:
+            details = []
+            if missing:
+                details.append("Missing or empty files: " + ", ".join(missing[:50]))
+            if invalid:
+                details.append("Invalid or protected paths: " + ", ".join(invalid[:20]))
+            return "Implementation gate remains locked. " + " | ".join(details)
+        self.implementation_complete = True
+        self.progress["implementation_complete"] = True
+        self.progress["planned_files"] = [str(item) for item in planned_files]
+        self.progress["implementation_completed_at"] = datetime.now(timezone.utc).isoformat()
+        self._save_progress()
+        self.status("Implementation files verified. Server startup and integration testing are now unlocked.")
+        return (
+            f"Implementation gate passed: all {len(planned_files)} planned files exist and are non-empty. "
+            "You may now run migrations, start Uvicorn, and perform integration/application tests."
+        )
+
     def _run_command(self, command: str) -> str:
         self._check_cancelled()
+        gated_patterns = (
+            r"\\buvicorn\\b",
+            r"\\bpytest\\b",
+            r"\\bpython\\s+-m\\s+unittest\\b",
+            r"\\bmanage\\.py\\s+test\\b",
+            r"\\b(?:npm|pnpm|yarn)\\s+(?:run\\s+)?(?:test|e2e|integration)\\b",
+            r"\\b(?:npm|pnpm|yarn)\\s+run\\s+(?:dev|start)\\b",
+            r"\\bflask\\s+run\\b",
+            r"\\b(?:django-admin|python\\s+-m\\s+http\\.server)\\b",
+        )
+        if not self.implementation_complete and any(
+            re.search(pattern, command, re.IGNORECASE) for pattern in gated_patterns
+        ):
+            return (
+                "BLOCKED by the write-first workflow: do not start Uvicorn/application servers "
+                "or run integration/application tests until all planned code files are written. "
+                "Finish the planned file checklist, then call complete_implementation with every "
+                "planned implementation file. Individual-file syntax/static checks are still allowed."
+            )
         blocked = (
             r"\b(shutdown|restart-computer|stop-computer|diskpart|bcdedit|manage-bde|clear-disk|format-volume|remove-partition)\b",
             r"\b(reg(?:\.exe)?\s+(add|delete)|format\s+[a-z]:)\b",
@@ -536,6 +609,8 @@ class CodingAgent:
                 return self._edit_file(**arguments)
             if name == "run_command":
                 return self._run_command(**arguments)
+            if name == "complete_implementation":
+                return self._complete_implementation(**arguments)
             return f"Unknown tool: {name}"
         except Exception as error:
             return f"Tool error: {error}"
