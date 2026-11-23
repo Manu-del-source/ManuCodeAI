@@ -1,4 +1,4 @@
-"""Standalone ManuCodeAI desktop application (Windows)."""
+"""Cross-platform standalone ManuCodeAI desktop application."""
 from __future__ import annotations
 
 import sys
@@ -235,7 +235,7 @@ class MainWindow(QMainWindow):
             import keyring
             keyring.set_password(APP_ORG, self._keyring_name(), self.api_key.text().strip())
         except Exception as error:
-            self._log(f"Could not save API key to Windows Credential Manager: {error}")
+            self._log(f"Could not save API key to the system credential store: {error}")
 
     def _log(self, message: str) -> None:
         self.activity.appendPlainText(message)
@@ -341,9 +341,6 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
-    if sys.platform != "win32":
-        print("The current ManuCodeAI desktop build targets Windows.")
-        return 1
     app = QApplication(sys.argv)
     app.setOrganizationName(APP_ORG)
     app.setApplicationName(APP_NAME)
