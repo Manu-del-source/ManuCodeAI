@@ -20,10 +20,10 @@ class VSCodeController:
     def __init__(self):
         # Keep one typing engine for the session so its natural timing stays consistent.
         self.typing_engine = WindowsTypingEngine(
-            min_delay=0.07,
-            max_delay=0.12,
-            line_delay_min=0.25,
-            line_delay_max=0.45,
+            min_delay=0.18,
+            max_delay=0.28,
+            line_delay_min=1.00,
+            line_delay_max=1.40,
         )
 
     @staticmethod
@@ -74,7 +74,9 @@ class VSCodeController:
             user32.EnumWindows(enum_callback, 0)
             if matches:
                 hwnd = matches[0]
-                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                # Restore only when actually minimized; do not toggle the window state.
+                if user32.IsIconic(hwnd):
+                    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
                 user32.SetForegroundWindow(hwnd)
                 time.sleep(0.25)
                 if user32.GetForegroundWindow() == hwnd:
@@ -109,7 +111,7 @@ class VSCodeController:
         # Create an empty file only when necessary; existing content is never appended.
         target.touch(exist_ok=True)
         subprocess.Popen(
-            [self._code_command(), "--reuse-window", "--goto", f"{target}:1"],
+            [self._code_command(), "--goto", f"{target}:1"],
             close_fds=True,
         )
         self._focus_editor(str(target), cancel_event=cancel_event)
