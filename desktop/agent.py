@@ -6,9 +6,11 @@ import hashlib
 import json
 import os
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import re
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -906,32 +908,65 @@ class CodingAgent:
 
 
     def _provider_request(self, request, provider_label: str):
-        """Retry transient provider/network failures without discarding agent history."""
-        delays = (2, 4, 8)
-        for attempt in range(len(delays) + 1):
+        """Retry transient provider/network failures within a bounded recovery window."""
+        delays = (2, 4, 8, 15, 25)
+        max_attempts = len(delays) + 1
+        max_elapsed = 180.0
+        started_at = time.monotonic()
+        network_error_names = {
+            "APIConnectionError", "APITimeoutError", "ConnectError",
+            "ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout",
+        }
+        for attempt in range(max_attempts):
             self._check_cancelled()
             try:
                 return request()
             except Exception as error:
-                status_code = getattr(error, "status_code", None)
-                retryable = (
-                    status_code is None
-                    or status_code in {408, 409, 425, 429}
-                    or (isinstance(status_code, int) and status_code >= 500)
+                response = getattr(error, "response", None)
+                status_code = getattr(error, "status_code", None) or getattr(response, "status_code", None)
+                retryable_status = (
+                    isinstance(status_code, int)
+                    and (status_code in {408, 409, 425, 429} or 500 <= status_code <= 599)
                 )
-                if not retryable or attempt >= len(delays):
+                retryable_network = (
+                    isinstance(error, (TimeoutError, ConnectionError, urllib.error.URLError))
+                    or error.__class__.__name__ in network_error_names
+                )
+                if not (retryable_status or retryable_network) or attempt >= len(delays):
                     raise AgentError(
                         f"{provider_label} request failed after {attempt + 1} attempt(s): {error}"
                     ) from error
-                delay = delays[attempt]
+
+                delay = float(delays[attempt])
+                headers = getattr(response, "headers", None)
+                retry_after = headers.get("retry-after") if headers is not None else None
+                if retry_after:
+                    try:
+                        delay = max(delay, float(retry_after))
+                    except (TypeError, ValueError):
+                        try:
+                            retry_at = parsedate_to_datetime(retry_after)
+                            if retry_at.tzinfo is None:
+                                retry_at = retry_at.replace(tzinfo=timezone.utc)
+                            delay = max(delay, (retry_at - datetime.now(timezone.utc)).total_seconds())
+                        except (TypeError, ValueError, OverflowError):
+                            pass
+                delay = max(0.0, delay)
+                elapsed = time.monotonic() - started_at
+                if elapsed + delay >= max_elapsed:
+                    raise AgentError(
+                        f"{provider_label} remained unavailable; the {int(max_elapsed)}-second "
+                        f"retry window was reached after {attempt + 1} attempt(s): {error}"
+                    ) from error
+
                 self.status(
                     f"{provider_label} temporary failure"
                     + (f" (HTTP {status_code})" if status_code else "")
-                    + f". Retrying in {delay}s; completed file progress is preserved."
+                    + f". Retry {attempt + 1}/{len(delays)} in {delay:g}s; "
+                    + "completed file progress is preserved."
                 )
                 if self.cancel_event.wait(delay):
                     raise AgentError("Coding session stopped during provider retry.") from error
-
     def _run_openai(self, prompt: str) -> str:
         history: list[dict] = [{"role": "user", "content": prompt}]
         for round_number in range(1, MAX_AGENT_ROUNDS + 1):
