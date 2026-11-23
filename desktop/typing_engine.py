@@ -129,9 +129,9 @@ class KeyboardKillSwitch:
 class WindowsTypingEngine:
     """Types code progressively with a steady pace and small natural pauses."""
 
-    def __init__(self, min_delay: float = 0.18, max_delay: float = 0.28,
-                 line_delay_min: float = 1.00, line_delay_max: float = 1.40):
-        # Slow, deliberate character entry with a longer pause between lines.
+    def __init__(self, min_delay: float = 0.025, max_delay: float = 0.055,
+                 line_delay_min: float = 0.16, line_delay_max: float = 0.34):
+        # Natural, readable coding pace: roughly 18–40 characters per second, with brief pauses.
         self.min_delay = min_delay
         self.max_delay = max_delay
         self.line_delay_min = line_delay_min
@@ -299,6 +299,7 @@ class WindowsTypingEngine:
     @classmethod
     def replace_current_document(cls) -> None:
         cls.shortcut(VK_CONTROL, VK_A)
+        cls._key(0x08)  # Backspace: clear selection; never append to old content.
 
     @classmethod
     def save_document(cls) -> None:
