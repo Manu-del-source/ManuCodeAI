@@ -20,10 +20,10 @@ class VSCodeController:
     def __init__(self):
         # Keep one typing engine for the session so its natural timing stays consistent.
         self.typing_engine = WindowsTypingEngine(
-            min_delay=0.025,
-            max_delay=0.055,
-            line_delay_min=0.16,
-            line_delay_max=0.34,
+            min_delay=0.07,
+            max_delay=0.12,
+            line_delay_min=0.25,
+            line_delay_max=0.45,
         )
 
     @staticmethod
