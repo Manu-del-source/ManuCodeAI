@@ -407,8 +407,12 @@ class CodingAgent:
         }
         self._save_progress()
         completed = [name for name, item in self.file_manifest.get("files", {}).items() if item.get("status") == "COMPLETED"]
-        if completed:
-            return prompt + "\n\nPERSISTED FILE PLAN: Already verified and completed for this exact task: " + ", ".join(completed) + ". Do not rediscover or rewrite these files. Continue only with unfinished planned files."
+        written = [name for name, item in self.file_manifest.get("files", {}).items() if item.get("status") == "WRITTEN"]
+        if completed or written:
+            return (prompt + "\n\nPERSISTED FILE PLAN: Completed files: " + (", ".join(completed) or "none")
+                    + ". Already visibly written and saved, requiring read-back review and COMPLETED status only: "
+                    + (", ".join(written) or "none")
+                    + ". Do not rewrite these files. Continue with the first genuinely unfinished file.")
         return prompt
 
     def _save_manifest(self) -> None:
