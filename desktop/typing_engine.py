@@ -1,8 +1,11 @@
-"""Native Windows keyboard typing for the standalone ManuCodeAI desktop app."""
+"""Cross-platform visible keyboard typing for the standalone ManuCodeAI app."""
 from __future__ import annotations
 
 import ctypes
 import random
+import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
