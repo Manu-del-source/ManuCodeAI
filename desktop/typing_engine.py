@@ -129,9 +129,9 @@ class KeyboardKillSwitch:
 class WindowsTypingEngine:
     """Types code progressively with a steady pace and small natural pauses."""
 
-    def __init__(self, min_delay: float = 0.025, max_delay: float = 0.055,
-                 line_delay_min: float = 0.16, line_delay_max: float = 0.34):
-        # Natural, readable coding pace: roughly 18–40 characters per second, with brief pauses.
+    def __init__(self, min_delay: float = 0.07, max_delay: float = 0.12,
+                 line_delay_min: float = 0.25, line_delay_max: float = 0.45):
+        # Moderate human coding pace with natural pauses between lines.
         self.min_delay = min_delay
         self.max_delay = max_delay
         self.line_delay_min = line_delay_min
