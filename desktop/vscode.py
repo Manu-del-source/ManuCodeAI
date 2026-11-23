@@ -1,4 +1,4 @@
-"""Launch VS Code and write approved code visibly into its editor."""
+"""Open the project and display files saved atomically by the coding agent."""
 from __future__ import annotations
 
 import os
@@ -8,13 +8,11 @@ import subprocess
 from pathlib import Path
 
 
-
 class VSCodeError(RuntimeError):
     pass
 
 
 class VSCodeController:
-
     @staticmethod
     def _code_command() -> str:
         command = shutil.which("code")
