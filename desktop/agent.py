@@ -670,12 +670,25 @@ class CodingAgent:
                 continue
             if not path.is_file() or path.stat().st_size == 0:
                 missing.append(str(filename))
-        if invalid or missing:
+        incomplete = []
+        planned = set()
+        for filename in planned_files:
+            try:
+                relative = self._safe_path(filename).relative_to(self.workspace).as_posix()
+            except (ValueError, OSError):
+                continue
+            planned.add(relative)
+            item = self.file_manifest.get("files", {}).get(relative, {})
+            if item.get("status") != "COMPLETED":
+                incomplete.append(f"{relative} [{item.get('status', 'NOT_IN_PLAN')}]")
+        if invalid or missing or incomplete:
             details = []
             if missing:
                 details.append("Missing or empty files: " + ", ".join(missing[:50]))
             if invalid:
                 details.append("Invalid or protected paths: " + ", ".join(invalid[:20]))
+            if incomplete:
+                details.append("Files not explicitly verified as COMPLETED: " + ", ".join(incomplete[:50]))
             return "Implementation gate remains locked. " + " | ".join(details)
         self.implementation_complete = True
         self.progress["implementation_complete"] = True
