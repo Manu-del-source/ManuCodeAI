@@ -416,9 +416,10 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
                 return;
             }
             case "filePath": {
+                // Paths arrive in fragments. Do not snapshot a partial path:
+                // it may resolve to a different file than the final target.
                 const session = event.session;
                 await this.previewManager.ensurePreview(session);
-                await this.captureBaseline(session);
                 this.post(view, { command: "currentFile", path: session.path });
                 return;
             }
@@ -435,12 +436,10 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
                 return;
             }
             case "fileDone": {
-                // The text is queued in the preview's typewriter and is still
-                // being revealed. Finalization (content backstop, ready
-                // status, "file ready" notice) happens in finishTyping once
-                // the paced reveal drains — that keeps the diff review and
-                // approval aligned with what the editor shows.
+                // The path is complete now. Capture the actual target file
+                // before any save, so conflict detection uses the right file.
                 await this.previewManager.ensurePreview(event.session);
+                await this.captureBaseline(event.session);
                 return;
             }
             case "done": {
@@ -460,8 +459,7 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
     }
 
     /**
-     * Capture the pre-generation state of the target file (baseline), the
-     * moment its path is known. It is used to detect external modifications
+     * Capture the target file baseline once the complete path is known. It is used to detect external modifications
      * before applying the proposed changes.
      */
     private async captureBaseline(session: FilePreviewSession): Promise<void> {
@@ -512,7 +510,7 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
     }
 
     // ------------------------------------------------------------------
-    // write_file: preview → diff → approval → apply
+    // write_file: progressive preview → diff visibility → automatic safe apply
     // ------------------------------------------------------------------
 
     private async writeFile(
