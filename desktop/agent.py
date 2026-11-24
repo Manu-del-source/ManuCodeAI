@@ -395,7 +395,11 @@ class CodingAgent:
             # Recover an interrupted visible write without blindly rewriting it.
             for relative, item in self.file_manifest.get("files", {}).items():
                 attempt = item.get("write_attempt")
-                if item.get("status") != "IN_PROGRESS" or not isinstance(attempt, dict):
+                if (
+                    item.get("status") != "IN_PROGRESS"
+                    or not isinstance(attempt, dict)
+                    or attempt.get("state") != "TYPING"
+                ):
                     continue
                 try:
                     saved_text = self._safe_path(relative).read_text(encoding="utf-8")
@@ -760,6 +764,12 @@ class CodingAgent:
                 ast.parse(saved_content, filename=relative)
                 self.status(f"Python post-save check passed: {relative}.")
             except SyntaxError as error:
+                manifest_entry["write_attempt"]["state"] = "VALIDATION_FAILED"
+                manifest_entry["verification_or_reason"] = (
+                    f"Post-save Python syntax validation failed at line {error.lineno}: "
+                    f"{error.msg}. Read the saved file and correct the syntax."
+                )
+                self._save_manifest()
                 return (
                     f"Post-save Python validation failed in {relative} at line "
                     f"{error.lineno}: {error.msg}. Read the saved file, fix it, and retry."
