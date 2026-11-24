@@ -39,7 +39,7 @@ The Windows backend uses native keyboard input. The Linux backend uses `xdotool`
 ## Architecture
 
 - `server/api.py` — FastAPI backend exposing `/health`, `/chat`, `/agent`, and streaming `/agent/stream` (SSE).
-- `vscode-extension/` — VS Code extension. Generated code streams progressively into native editor tabs (untitled in-memory documents), per file, then saves automatically after a baseline conflict check and read-back verification. No per-file approval dialog is shown.
+- `vscode-extension/` — VS Code extension. Generated code streams progressively into native editor tabs (untitled in-memory documents), per file, with approval (native diff + modal) before anything touches the workspace.
 - `main.py` — original terminal agent (preserved).
 
 ### Extension structure
@@ -50,17 +50,17 @@ The Windows backend uses native keyboard input. The Linux backend uses `xdotool`
   - `typewriter.ts` — human-like typing pace for the preview editor (queue, tiny chunks, per-file cancellation).
   - `agentStreamRunner.ts` — parses the backend SSE stream and drives the tracker.
   - `fileOps.ts` — the only workspace writers (read/write/conflict detection).
-  - `approval.ts` — legacy pure approval-decision helpers (not used by the automatic save path); `language.ts` maps paths to editor languages.
+  - `approval.ts` / `language.ts` — approval decisions and path → language mapping.
 - `src/previewManager.ts` — VS Code glue: untitled documents, native tabs, paced (human-like) reveal updates, cancellation status.
 - `src/extension.ts` — wiring: SSE consumption, approval flow, webview sidebar.
 
-### Preview → automatic save pipeline
+### Preview → approval pipeline
 
 1. The backend streams `tool_call_start`, `tool_call_delta` (raw argument fragments), `tool_call`, `done`.
 2. The extension opens one untitled preview tab per `write_file` and types the incoming characters into it at the configured human-like speed. The stream itself is consumed at full speed — only the editor rendering is paced.
-3. When the stream completes and the typing finishes, the extension opens a native diff for visibility. It does not wait for a decision.
-4. The extension re-reads the target and compares it with the baseline captured after the complete file path arrives. If the file changed externally, it refuses to overwrite and returns the conflict to the agent; otherwise it writes, reads back to verify, and opens the saved file.
-5. Cancelled generation marks the preview incomplete and never executes writes. No approval dialog is shown for generated file changes.
+3. When the stream completes and the typing finishes, a native diff (original vs proposed) is shown; the user approves or rejects.
+4. Approved changes are written — with an external-modification conflict check — and the workspace file is opened.
+5. Rejected changes leave the workspace byte-identical; cancelled generation marks the preview incomplete and never executes writes.
 
 ## Typing speed
 
@@ -122,5 +122,5 @@ SSE events from `/agent/stream`:
 
 - API binds to localhost by default.
 - `.env` and secret files are never read or modified.
-- Generated file writes are automatic after workspace-boundary validation, baseline conflict detection, and save verification. Ordinary development commands (build, test, install, and inspection) run automatically; a small set of clearly destructive system, repository-reset, and database commands is blocked.
+- File writes and command execution require explicit user approval.
 - Workspace boundaries are enforced.
