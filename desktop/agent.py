@@ -98,8 +98,9 @@ TOOLS = [
                 "Make a targeted edit to an existing project text file. Provide an exact "
                 "old_text snippet and its replacement new_text. The old_text must occur "
                 "exactly once. Prefer this over rewriting an entire existing file. "
-                "After a successful change, move to another unfinished file. Repeated "
-                "edits to the same file require an explicit NEEDS_CORRECTION transition; saved and read-back verified files remain VALIDATION_PENDING until focused checks pass and update_file_status marks them COMPLETED."
+                "After a successful change, keep working on that file's validation. Repeated edits "
+                "require an explicit NEEDS_CORRECTION transition; a saved file remains "
+                "VALIDATION_PENDING until focused checks pass and update_file_status marks it COMPLETED."
             ),
             "parameters": {
                 "type": "object",
@@ -130,7 +131,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "set_file_plan",
-            "description": "Persist the ordered list of files that genuinely need implementation for this task. Call once after initial inspection and before coding; preserve the existing ordered plan on resume. The application advances automatically when a file is visibly typed, saved, and verified.",
+            "description": "Persist the ordered list of files that genuinely need implementation for this task. Call once after initial inspection and before coding; preserve the existing ordered plan on resume. The application advances only after a file is visibly typed, saved, read back, validated, and marked COMPLETED.",
             "parameters": {"type":"object","properties":{"planned_files":{"type":"array","items":{"type":"string"},"minItems":1}},"required":["planned_files"],"additionalProperties":False}
         }
     },
@@ -189,13 +190,15 @@ DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
    Use write_file for an existing file only when a substantial rewrite is genuinely necessary.
 7. Never call write_file or edit_file repeatedly with the same content. Do not rewrite a file
    just to show progress. After a successful write or edit, verify the saved content. The
-   application records successful writes as completed automatically; do not manually mark
-   a successful file COMPLETED. A verified file must never be changed again without a
-   concrete defect or unmet requirement. Use edit_file only for a targeted correction.
-8. Maintain forward progress through the planned file list. Once the application confirms
-   a file is saved and verified, move to the next unfinished file. Do not reopen completed
-   files without a concrete test failure, syntax error, or unmet requirement. If a correction
-   is necessary, read the latest version and use one targeted edit, then rerun the relevant check.
+   application marks the file VALIDATION_PENDING, not COMPLETED. Run the narrowest relevant
+   tests/static checks, inspect their output, read the saved file again, and call
+   update_file_status COMPLETED with the actual validation result. A file must never be
+   changed again without a concrete defect or unmet requirement. Use targeted edits only.
+8. Maintain forward progress through the planned file list. Do not start the next file while
+   the current file is VALIDATION_PENDING. Complete its validation first. Do not reopen
+   completed files without a concrete test failure, syntax error, or unmet requirement.
+   If a correction is necessary, mark NEEDS_CORRECTION, read the latest version, make one
+   targeted edit, and rerun the relevant check.
 8a. Never make consecutive successful changes to the same file. After a successful write
    or edit, immediately move to a different unfinished file. The tools enforce a per-file
    edit limit and a same-file cooldown; do not try alternate tool calls to bypass it.
