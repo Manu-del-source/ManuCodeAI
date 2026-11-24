@@ -122,5 +122,5 @@ SSE events from `/agent/stream`:
 
 - API binds to localhost by default.
 - `.env` and secret files are never read or modified.
-- Generated file writes are automatic after workspace-boundary validation, baseline conflict detection, and save verification. Command execution retains its separate safety handling.
+- Generated file writes are automatic after workspace-boundary validation, baseline conflict detection, and save verification. Ordinary development commands (build, test, install, and inspection) run automatically; a small set of clearly destructive system, repository-reset, and database commands is blocked.
 - Workspace boundaries are enforced.
