@@ -200,8 +200,9 @@ DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
    If a correction is necessary, mark NEEDS_CORRECTION, read the latest version, make one
    targeted edit, and rerun the relevant check.
 8a. Never make consecutive successful changes to the same file. After a successful write
-   or edit, immediately move to a different unfinished file. The tools enforce a per-file
-   edit limit and a same-file cooldown; do not try alternate tool calls to bypass it.
+   or edit, validate the current file and mark it COMPLETED before moving to the next
+   unfinished file. If validation fails, mark NEEDS_CORRECTION before making one targeted fix.
+   The tools enforce a per-file edit limit and a same-file cooldown; do not bypass them.
 8b. After initial inspection, call set_file_plan with the ordered list of files that truly
    need changes. Do not include unchanged files. This plan persists across interrupted runs.
 8c. Work through the saved plan strictly in order, one file at a time. Mark the current file
