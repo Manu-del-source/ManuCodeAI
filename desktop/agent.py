@@ -398,8 +398,10 @@ class CodingAgent:
                 if item.get("status") != "IN_PROGRESS" or not isinstance(attempt, dict):
                     continue
                 try:
-                    actual = hashlib.sha256(self._safe_path(relative).read_bytes()).hexdigest()
-                except (OSError, ValueError):
+                    saved_text = self._safe_path(relative).read_text(encoding="utf-8")
+                    normalized_saved = saved_text.replace("\r\n", "\n").replace("\r", "\n")
+                    actual = hashlib.sha256(normalized_saved.encode("utf-8")).hexdigest()
+                except (OSError, UnicodeDecodeError, ValueError):
                     actual = ""
                 intended = attempt.get("content_sha256")
                 if intended and actual == intended:
