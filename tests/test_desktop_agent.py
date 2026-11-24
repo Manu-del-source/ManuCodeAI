@@ -1,6 +1,7 @@
 """Focused, provider-free tests for standalone desktop agent safety."""
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import threading
 import unittest
@@ -94,6 +95,38 @@ class CodingAgentPathTests(unittest.TestCase):
         self.assertIn("cannot be reopened or downgraded", result.lower())
         self.assertEqual(
             self.agent.file_manifest["files"]["src/example.py"]["status"],
+            "COMPLETED",
+        )
+
+    def test_validation_pending_file_requires_readback_before_completion(self) -> None:
+        target = self.workspace / "sample.py"
+        target.write_text("print('ok')\n", encoding="utf-8")
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        self.agent.file_manifest = {
+            "files": {
+                "sample.py": {
+                    "status": "VALIDATION_PENDING",
+                    "saved_sha256": digest,
+                }
+            }
+        }
+        self.agent.manifest_path = self.workspace / ".manucodeai" / "file_manifest.json"
+        self.agent.progress_path = self.workspace / ".manucodeai" / "progress.json"
+        self.agent.progress = {}
+        self.agent._completed_files = set()
+
+        blocked = self.agent._update_file_status(
+            "sample.py", "COMPLETED", "Focused unit tests passed."
+        )
+        self.assertIn("read the saved file again", blocked.lower())
+
+        self.agent._read_file("sample.py")
+        completed = self.agent._update_file_status(
+            "sample.py", "COMPLETED", "Focused unit tests passed."
+        )
+        self.assertIn("sample.py is now COMPLETED", completed)
+        self.assertEqual(
+            self.agent.file_manifest["files"]["sample.py"]["status"],
             "COMPLETED",
         )
 
