@@ -544,7 +544,7 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
 
         const sessionContent = session ? session.content : proposed;
 
-        return await this.approveAndApply(view, relPath, sessionContent, session);
+        return await this.autoSavePreview(view, relPath, sessionContent, session);
     }
 
     /**
@@ -558,7 +558,7 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
      * - Verify the saved bytes by reading the file back.
      * - No approval modal or per-file confirmation is shown.
      */
-    private async approveAndApply(
+    private async autoSavePreview(
         view: vscode.WebviewView,
         relPath: string,
         proposed: string,
@@ -663,8 +663,8 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
                 `Proposed changes: ${relPath}`,
             );
         } catch (error) {
-            // The diff must not block the approval flow — if it fails we
-            // still let the user decide.
+            // The diff is informational only; a diff-view failure must not
+            // prevent the automatic save or require user interaction.
             void error;
         }
 
