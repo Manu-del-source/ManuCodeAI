@@ -77,7 +77,7 @@ TOOLS = [
                 "Create a new project text file autonomously. For an existing file, prefer "
                 "edit_file with a precise old_text/new_text replacement. A successful full "
                 "write may not be repeated in the same session; use edit_file for corrections. "
-                "The app opens the target in VS Code, clears the document exactly once, types the content progressively at a natural human pace, saves, and verifies the saved file. Never append a full file to existing content."
+                "The app opens the target in VS Code, clears the document exactly once, types the content progressively at a natural human pace, saves, and verifies the saved file. The file then remains VALIDATION_PENDING: run focused tests or static checks, read it back, and call update_file_status with COMPLETED only after validation. Never append a full file to existing content."
             ),
             "parameters": {
                 "type": "object",
@@ -99,7 +99,7 @@ TOOLS = [
                 "old_text snippet and its replacement new_text. The old_text must occur "
                 "exactly once. Prefer this over rewriting an entire existing file. "
                 "After a successful change, move to another unfinished file. Repeated "
-                "edits to the same file require an explicit NEEDS_CORRECTION transition; saved and verified files are automatically completed by the application."
+                "edits to the same file require an explicit NEEDS_CORRECTION transition; saved and read-back verified files remain VALIDATION_PENDING until focused checks pass and update_file_status marks them COMPLETED."
             ),
             "parameters": {
                 "type": "object",
@@ -138,7 +138,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "update_file_status",
-            "description": "Set a planned file to IN_PROGRESS or NEEDS_CORRECTION. The application automatically marks files COMPLETED after exact save/read-back verification; do not manually mark a successful write completed. Mark NEEDS_CORRECTION with a concrete reason before revisiting a completed file.",
+            "description": "Set a planned file to IN_PROGRESS, COMPLETED after validation, or NEEDS_CORRECTION. A saved file stays VALIDATION_PENDING until focused tests/static checks have been run and its current contents have been read back. Include the actual validation result when marking it COMPLETED. Mark NEEDS_CORRECTION with a concrete reason when a check fails.",
             "parameters": {"type":"object","properties":{"filename":{"type":"string"},"status":{"type":"string","enum":["IN_PROGRESS","COMPLETED","NEEDS_CORRECTION"]},"verification_or_reason":{"type":"string"}},"required":["filename","status","verification_or_reason"],"additionalProperties":False}
         }
     },
@@ -203,9 +203,11 @@ DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
    need changes. Do not include unchanged files. This plan persists across interrupted runs.
 8c. Work through the saved plan strictly in order, one file at a time. Mark the current file
    IN_PROGRESS before changing it. After typing and saving, read it back and verify it,
-   The application automatically marks the file COMPLETED after exact save/read-back
-   verification and advances the queue. Do not issue a second status call to complete it.
-   Never return to a WRITTEN or COMPLETED file. For a real defect, mark NEEDS_CORRECTION first.
+   The application marks the file VALIDATION_PENDING after exact save/read-back verification.
+   Run focused tests, lint, type checks, or syntax checks; inspect the results; read the file
+   again; then call update_file_status COMPLETED with the validation result. The queue will
+   not advance until this succeeds. Never return to a VALIDATION_PENDING or COMPLETED file
+   unless a real defect requires NEEDS_CORRECTION. For a real defect, mark NEEDS_CORRECTION first.
 8d. On resume, continue from the first unfinished file in the saved plan. Do not repeat
    environment inventory, package listing, or full project discovery unless necessary.
 9. Do not make unrelated changes. Preserve existing architecture, naming, formatting, and behavior.
@@ -225,6 +227,9 @@ RULES:
 - Do not overwrite existing files without reading their latest contents in this session.
 - Prefer edit_file for precise changes to existing files; its old_text must match exactly once.
 - Use write_file for new files or deliberate substantial rewrites only.
+- A successful visible write is not fully complete until the saved file has passed the
+  narrowest relevant tests/static checks and update_file_status records the result.
+  Do not start another planned file while the current file is VALIDATION_PENDING.
 - A successful write/edit is a completed step: do not repeat it unless verification reveals
   a specific problem or a new requirement requires another change.
 - Trace imports, callers, data models, and tests before editing. After each logical file change,
@@ -409,9 +414,12 @@ class CodingAgent:
                     actual = ""
                 intended = attempt.get("content_sha256")
                 if intended and actual == intended:
-                    item["status"] = "COMPLETED"
-                    item["verified_sha256"] = actual
-                    item["verification_or_reason"] = "Recovered interrupted write: saved content matches intended hash."
+                    item["status"] = "VALIDATION_PENDING"
+                    item["saved_sha256"] = actual
+                    item["verification_or_reason"] = (
+                        "Recovered interrupted write: saved content matches the intended hash. "
+                        "Run focused validation before marking this file COMPLETED."
+                    )
                     item["updated_at"] = datetime.now(timezone.utc).isoformat()
                     item.pop("write_attempt", None)
                 else:
@@ -499,12 +507,13 @@ class CodingAgent:
         for relative in ordered_names:
             prior = old.get(relative, {})
             status = prior.get("status", "NOT_STARTED")
-            if status not in {"NOT_STARTED", "IN_PROGRESS", "WRITTEN", "COMPLETED", "NEEDS_CORRECTION"}:
+            if status not in {"NOT_STARTED", "IN_PROGRESS", "WRITTEN", "VALIDATION_PENDING", "COMPLETED", "NEEDS_CORRECTION"}:
                 status = "NOT_STARTED"
             files[relative] = {
                 "status": status,
                 "verification_or_reason": prior.get("verification_or_reason", ""),
                 **({"verified_sha256": prior["verified_sha256"]} if prior.get("verified_sha256") else {}),
+                **({"saved_sha256": prior["saved_sha256"]} if prior.get("saved_sha256") else {}),
                 **({"updated_at": prior["updated_at"]} if prior.get("updated_at") else {}),
                 **({"write_attempt": prior["write_attempt"]} if prior.get("write_attempt") else {}),
             }
@@ -531,6 +540,11 @@ class CodingAgent:
                 "A completed file cannot be reopened or downgraded. If a real defect exists, "
                 "use NEEDS_CORRECTION with a specific reason."
             )
+        if current_status == "VALIDATION_PENDING" and status not in {"COMPLETED", "NEEDS_CORRECTION"}:
+            return (
+                f"Status update rejected: {relative} is awaiting validation. "
+                "Run focused checks and mark it COMPLETED, or use NEEDS_CORRECTION if a check fails."
+            )
         if status == "IN_PROGRESS":
             first_unfinished = next(
                 (name for name, item in files.items() if item.get("status") != "COMPLETED"),
@@ -552,14 +566,20 @@ class CodingAgent:
             except (OSError, UnicodeDecodeError) as error:
                 return f"Cannot mark {relative} COMPLETED: {error}"
             prior = files[relative]
-            if prior.get("status") == "WRITTEN":
+            if prior.get("status") == "VALIDATION_PENDING":
+                expected = prior.get("saved_sha256")
+                if relative not in self._read_since_write:
+                    return f"Cannot mark {relative} COMPLETED: read the saved file again after running its focused checks."
+                if expected and hashlib.sha256(saved).hexdigest() != expected:
+                    return f"Cannot mark {relative} COMPLETED: the file changed after its saved-content verification."
+            elif prior.get("status") == "WRITTEN":
                 expected = prior.get("verified_sha256")
                 if expected and hashlib.sha256(saved).hexdigest() != expected:
                     return f"Cannot mark {relative} COMPLETED: its saved content no longer matches the verified write."
                 if not expected and relative not in self._read_since_write:
                     return f"Cannot mark {relative} COMPLETED: read the legacy saved file first."
-            elif relative not in self._read_since_write:
-                return f"Cannot mark {relative} COMPLETED: read the current file first and verify it against the task."
+            else:
+                return f"Cannot mark {relative} COMPLETED before it has been saved and verified."
             self._completed_files.add(relative)
         elif status == "NEEDS_CORRECTION":
             self._completed_files.discard(relative)
@@ -576,6 +596,12 @@ class CodingAgent:
         self.file_manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
         self._save_manifest()
         self.progress["completed_files"] = sorted(self._completed_files)
+        if status == "COMPLETED":
+            self.progress["last_completed_file"] = relative
+            self.progress["next_file"] = next(
+                (name for name, item in files.items() if item.get("status") != "COMPLETED"),
+                None,
+            )
         self._save_progress()
         return f"{relative} is now {status}. " + ("Move to the next unfinished file." if status == "COMPLETED" else "Address only the recorded reason.")
 
@@ -653,6 +679,8 @@ class CodingAgent:
             return f"Write blocked: mark {relative} IN_PROGRESS with update_file_status before editing it."
         if manifest_entry.get("status") == "COMPLETED":
             return f"Edit blocked: {relative} is marked COMPLETED in the persistent plan. If a concrete defect exists, mark it NEEDS_CORRECTION first."
+        if manifest_entry.get("status") == "VALIDATION_PENDING":
+            return f"Change blocked: {relative} is saved and read-back verified but still awaits focused validation. Run the relevant checks and mark it COMPLETED, or mark NEEDS_CORRECTION if a defect is found."
         if manifest_entry.get("status") == "WRITTEN":
             return f"Change blocked: {relative} has already been visibly typed, saved, and read-back verified. Do not rewrite or edit it. If a concrete defect is found, first mark it NEEDS_CORRECTION with the reason, then make one targeted correction."
         ordered = list(manifest_files.items())
@@ -780,14 +808,13 @@ class CodingAgent:
         verified_digest = hashlib.sha256(saved_content.encode("utf-8")).hexdigest()
         if relative in self.file_manifest.get("files", {}):
             self.file_manifest["files"][relative] = {
-                "status": "COMPLETED",
-                "verification_or_reason": "Application verified exact saved content against the requested content.",
-                "verified_sha256": verified_digest,
+                "status": "VALIDATION_PENDING",
+                "verification_or_reason": "Exact save/read-back verification passed; focused validation is still required.",
+                "saved_sha256": verified_digest,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
             self.file_manifest["files"][relative].pop("write_attempt", None)
             self.file_manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
-            self._completed_files.add(relative)
             self._save_manifest()
         if targeted_edit:
             self._successful_edits[relative] = self._successful_edits.get(relative, 0) + 1
@@ -795,19 +822,18 @@ class CodingAgent:
             self._full_write_success.add(relative)
         self.progress["completed_files"] = sorted(self._completed_files)
         self.progress["successful_edits"] = self._successful_edits
-        self.progress["last_completed_file"] = relative
-        self.progress["next_file"] = next(
-            (name for name, item in self.file_manifest.get("files", {}).items()
-             if item.get("status") != "COMPLETED"),
-            None,
-        )
+        self.progress["last_saved_file"] = relative
+        self.progress["next_file"] = relative
         self._save_progress()
-        next_file = self.progress["next_file"]
-        self.status(f"Verified and completed {relative}. " + (f"Next file: {next_file}." if next_file else "All planned files are complete."))
+        self.status(
+            f"Saved and verified {relative}. Run its focused checks before moving to the next file."
+        )
         return (
             f"Successfully typed visibly in VS Code, saved, and read-back verified {relative}. "
-            + (f"The application has marked it COMPLETED and advanced the queue to {next_file}. " if next_file else "The application has marked it COMPLETED; all planned files are complete. ")
-            + "Do not call update_file_status for this file or write it again."
+            "It is now VALIDATION_PENDING, not completed. Run focused tests, lint/type checks, "
+            "or syntax checks; inspect the output; read the file again; then call "
+            "update_file_status with status COMPLETED and the actual validation result. "
+            "If a check fails, mark NEEDS_CORRECTION with the concrete failure and fix it."
         )
 
     def _edit_file(self, filename: str, old_text: str, new_text: str) -> str:
@@ -817,7 +843,7 @@ class CodingAgent:
         manifest_entry = self.file_manifest.get("files", {}).get(relative)
         if manifest_entry is None:
             return f"Cannot edit {relative}: it is not in the persisted file plan."
-        if manifest_entry.get("status") in {"WRITTEN", "COMPLETED"}:
+        if manifest_entry.get("status") in {"WRITTEN", "VALIDATION_PENDING", "COMPLETED"}:
             return (
                 f"Cannot edit {relative}: its current state is {manifest_entry.get('status')}. "
                 "For a genuine defect, first transition it to NEEDS_CORRECTION with a concrete reason."
