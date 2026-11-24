@@ -16,12 +16,6 @@ import {
     writeWorkspaceFile,
     detectExternalModification,
 } from "./core/fileOps";
-import {
-    mapApprovalChoice,
-    mapConflictChoice,
-    decideApprovalOutcome,
-    ApprovalDecision,
-} from "./core/approval";
 import { PreviewManager } from "./previewManager";
 
 const execAsync = promisify(exec);
@@ -555,12 +549,27 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
         return await this.approveAndApply(view, relPath, sessionContent, session);
     }
 
+    /**
+     * Apply generated code automatically after visible preview typing.
+     *
+     * Safety rules:
+     * - Never write a cancelled/incomplete preview.
+     * - Compare the workspace file with the captured baseline immediately
+     *   before writing; if another process/user changed it, stop and let the
+     *   model re-read/reconcile instead of silently overwriting their work.
+     * - Verify the saved bytes by reading the file back.
+     * - No approval modal or per-file confirmation is shown.
+     */
     private async approveAndApply(
         view: vscode.WebviewView,
         relPath: string,
         proposed: string,
         session: FilePreviewSession | undefined,
     ): Promise<string> {
+        if (this.abortController?.signal.aborted || session?.status === "cancelled") {
+            return `Skipped ${relPath}: generation was cancelled before saving.`;
+        }
+
         let target: string;
         try {
             target = await this.resolveWorkspacePath(relPath, true);
@@ -570,101 +579,54 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
             return `Cannot write ${relPath}: ${detail}`;
         }
 
-        // Baseline: captured during generation when possible.
-        let baselineExists: boolean;
-        let baselineContent: string | null;
-        if (session?.baselineCaptured) {
-            baselineExists = session.baselineExists;
-            baselineContent = session.baselineContent;
-        } else {
-            // Fallback: capture as-is — no external-modification detection.
-            const current = await readWorkspaceFile(target);
-            baselineExists = current.exists;
-            baselineContent = current.exists ? current.content : null;
+        if (session && !session.baselineCaptured) {
+            const detail = `Cannot safely save ${relPath}: its original file state was not captured before generation completed. Re-read the file and retry.`;
+            this.send(view, "Error", detail);
+            return detail;
         }
 
-        // Open a native diff between the original and the proposed content.
-        const temp = await this.buildDiff(target, relPath, baselineExists, proposed);
+        const baseline = session
+            ? { exists: session.baselineExists, content: session.baselineContent ?? "" }
+            : await readWorkspaceFile(target);
+
+        // Open a diff for visibility, but never block execution for approval.
+        const temp = await this.buildDiff(target, relPath, baseline.exists, proposed);
         try {
-            const existing = baselineExists;
-            const choice = await vscode.window.showWarningMessage(
-                existing
-                    ? `Modify ${relPath}? Review the diff before approving.`
-                    : `Create ${relPath}? Review the diff before approving.`,
-                { modal: true },
-                existing ? "Apply changes" : "Apply",
-                "Reject",
-            );
-            const approvalChoice = mapApprovalChoice(choice);
+            if (this.abortController?.signal.aborted || session?.status === "cancelled") {
+                return `Skipped ${relPath}: generation was cancelled before saving.`;
+            }
 
             const current = await readWorkspaceFile(target);
-            const conflict = detectExternalModification(
-                { exists: baselineExists, content: baselineContent ?? "" },
-                current,
-                relPath,
-            );
-
-            let conflictChoice: ApprovalDecision | null = null;
-
-            if (conflict && approvalChoice === "apply") {
-                const conflictChoiceUI = await vscode.window.showWarningMessage(
-                    `${conflict} Apply changes anyway?`,
-                    { modal: true },
-                    "Apply anyway",
-                    "Cancel",
-                );
-                conflictChoice = mapConflictChoice(conflictChoiceUI);
+            const conflict = detectExternalModification(baseline, current, relPath);
+            if (conflict) {
+                const detail = `Not saved: ${conflict} I left the workspace file untouched. The agent must read the latest file and regenerate or merge its changes.`;
+                this.send(view, "Error", detail);
+                return detail;
             }
 
-            const outcome = decideApprovalOutcome({
-                baselineExists,
-                baselineContent,
-                currentExists: current.exists,
-                currentContent: current.content,
-                approvalChoice: approvalChoice,
-                conflictChoice: conflictChoice || null,
-            });
-
-            if (outcome.decision === "apply") {
-                this.postFileReady(view, relPath);
-                await writeWorkspaceFile(target, proposed);
-                if (session) {
-                    session.status = "applied";
-                    this.previewManager.setStatus(session.index, "applied");
-                    await this.previewManager.closePreview(session.index);
-                }
-                const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
-                await vscode.window.showTextDocument(document, { preview: false });
-                const size = proposed.length;
-                this.send(
-                    view,
-                    "Progress",
-                    `Saved ${relPath} (${size} characters). The file was opened in VS Code.`,
-                );
-                return `Saved ${relPath} (${size} characters). The file was opened in VS Code.`;
+            await writeWorkspaceFile(target, proposed);
+            const saved = await readWorkspaceFile(target);
+            if (!saved.exists || saved.content !== proposed) {
+                throw new Error(`Save verification failed for ${relPath}: the file on disk does not match the generated preview.`);
             }
 
-            if (outcome.decision === "reject") {
-                if (session) {
-                    session.status = "rejected";
-                    this.previewManager.setStatus(session.index, "rejected");
-                    await this.previewManager.closePreview(session.index);
-                }
-                this.send(view, "System", `Changes to ${relPath} were rejected. No file was modified.`);
-                return `Changes to ${relPath} were rejected. No file was modified.`;
-            }
-
-            // cancel
             if (session) {
-                this.previewManager.markCancelled(session.index);
+                session.status = "applied";
+                this.previewManager.setStatus(session.index, "applied");
+                await this.previewManager.closePreview(session.index);
             }
-            this.send(view, "System", `Changes to ${relPath} were cancelled. No file was modified.`);
-            return `Changes to ${relPath} were cancelled. No file was modified.`;
+
+            const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
+            await vscode.window.showTextDocument(document, { preview: false });
+            const message = `Saved and verified ${relPath} (${proposed.length} characters). No approval was required.`;
+            this.send(view, "Progress", message);
+            return message;
+        } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            this.send(view, "Error", `Could not save ${relPath}: ${detail}`);
+            return `Could not save ${relPath}: ${detail}`;
         } finally {
-            // Clean up the proposals' temp-diff files (the diff view retains its own copy).
-            for (const file of temp) {
-                await fs.rm(file, { force: true }).catch(() => {});
-            }
+            for (const file of temp) await fs.rm(file, { force: true }).catch(() => {});
         }
     }
 
