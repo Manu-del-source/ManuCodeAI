@@ -227,6 +227,12 @@ RULES:
 - Use write_file for new files or deliberate substantial rewrites only.
 - A successful write/edit is a completed step: do not repeat it unless verification reveals
   a specific problem or a new requirement requires another change.
+- Trace imports, callers, data models, and tests before editing. After each logical file change,
+  run the narrowest relevant syntax check or unit test available; inspect failures and fix their
+  root cause before moving on.
+- Do not finish a coding task with prose, an architecture proposal, or a plan. Continue tool
+  calls until complete_implementation verifies every planned file. A prose-only response is
+  not successful implementation.
 - On Windows, run commands through PowerShell and prefer native PowerShell commands
   such as Get-ChildItem. On Linux, use the configured system shell and native Linux
   commands. Never assume the other operating system's shell or command syntax.
@@ -386,6 +392,27 @@ class CodingAgent:
                 elif actual_digest != expected_digest:
                     item["status"] = "NEEDS_CORRECTION"
                     item["verification_or_reason"] = "Saved file differs from the last verified content; inspect before making a targeted correction."
+            # Recover an interrupted visible write without blindly rewriting it.
+            for relative, item in self.file_manifest.get("files", {}).items():
+                attempt = item.get("write_attempt")
+                if item.get("status") != "IN_PROGRESS" or not isinstance(attempt, dict):
+                    continue
+                try:
+                    actual = hashlib.sha256(self._safe_path(relative).read_bytes()).hexdigest()
+                except (OSError, ValueError):
+                    actual = ""
+                intended = attempt.get("content_sha256")
+                if intended and actual == intended:
+                    item["status"] = "COMPLETED"
+                    item["verified_sha256"] = actual
+                    item["verification_or_reason"] = "Recovered interrupted write: saved content matches intended hash."
+                    item["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    item.pop("write_attempt", None)
+                else:
+                    item["verification_or_reason"] = (
+                        "Previous visible typing was interrupted. Read the current saved file "
+                        "before deciding whether a targeted correction or full retry is needed."
+                    )
             self._save_manifest()
         else:
             self.file_manifest = {"task_hash": self.task_hash, "task": prompt[:500], "files": {}}
@@ -473,6 +500,7 @@ class CodingAgent:
                 "verification_or_reason": prior.get("verification_or_reason", ""),
                 **({"verified_sha256": prior["verified_sha256"]} if prior.get("verified_sha256") else {}),
                 **({"updated_at": prior["updated_at"]} if prior.get("updated_at") else {}),
+                **({"write_attempt": prior["write_attempt"]} if prior.get("write_attempt") else {}),
             }
         self.file_manifest = {"task_hash": self.task_hash, "task": self.progress.get("task", "")[:500], "updated_at": datetime.now(timezone.utc).isoformat(), "files": files}
         self._save_manifest()
@@ -490,6 +518,23 @@ class CodingAgent:
         files = self.file_manifest.get("files", {})
         if relative not in files:
             return f"Status update rejected: {relative} is not in the file plan."
+        current_status = files[relative].get("status")
+        if current_status in {"COMPLETED", "WRITTEN"} and status != "NEEDS_CORRECTION":
+            return (
+                f"Status update rejected: {relative} is already {current_status}. "
+                "A completed file cannot be reopened or downgraded. If a real defect exists, "
+                "use NEEDS_CORRECTION with a specific reason."
+            )
+        if status == "IN_PROGRESS":
+            first_unfinished = next(
+                (name for name, item in files.items() if item.get("status") != "COMPLETED"),
+                None,
+            )
+            if first_unfinished and first_unfinished != relative:
+                return (
+                    f"Status update rejected: finish {first_unfinished} before starting "
+                    f"{relative}. The saved plan must be followed in order."
+                )
         if not verification_or_reason.strip():
             return "Status update rejected: include a verification note or concrete correction reason."
         if status == "COMPLETED":
@@ -679,6 +724,16 @@ class CodingAgent:
                 return detail
 
         path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_entry["write_attempt"] = {
+            "content_sha256": hashlib.sha256(
+                content.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+            ).hexdigest(),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "state": "TYPING",
+        }
+        manifest_entry["verification_or_reason"] = "Visible typing started; awaiting exact save/read-back verification."
+        self.file_manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self._save_manifest()
         self.status(f"Opening {relative} in VS Code for visible typing...")
         self._check_cancelled()
         self.vscode.write_file_visibly(
@@ -718,6 +773,7 @@ class CodingAgent:
                 "verified_sha256": verified_digest,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
+            self.file_manifest["files"][relative].pop("write_attempt", None)
             self.file_manifest["updated_at"] = datetime.now(timezone.utc).isoformat()
             self._completed_files.add(relative)
             self._save_manifest()
@@ -833,24 +889,22 @@ class CodingAgent:
 
     def _run_command(self, command: str) -> str:
         self._check_cancelled()
-        gated_patterns = (
+        startup_patterns = (
             r"\buvicorn\b",
-            r"\bpytest\b",
-            r"\bpython\s+-m\s+unittest\b",
-            r"\bmanage\.py\s+test\b",
-            r"\b(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:test|e2e|integration)\b",
             r"\b(?:npm|pnpm|yarn)\s+run\s+(?:dev|start)\b",
             r"\bflask\s+run\b",
             r"\b(?:django-admin|python\s+-m\s+http\.server)\b",
         )
-        if not self.implementation_complete and any(
-            re.search(pattern, command, re.IGNORECASE) for pattern in gated_patterns
+        integration_patterns = (r"\b(?:e2e|integration)\b", r"\b(?:playwright|cypress)\b")
+        if not self.implementation_complete and (
+            any(re.search(pattern, command, re.IGNORECASE) for pattern in startup_patterns)
+            or any(re.search(pattern, command, re.IGNORECASE) for pattern in integration_patterns)
         ):
             return (
-                "BLOCKED by the write-first workflow: do not start Uvicorn/application servers "
-                "or run integration/application tests until all planned code files are written. "
-                "Finish the planned file checklist, then call complete_implementation with every "
-                "planned implementation file. Individual-file syntax/static checks are still allowed."
+                "Blocked: do not start the application or run end-to-end/integration tests "
+                "until planned implementation files are complete. Focused unit tests, linters, "
+                "type checks, and syntax checks are allowed during implementation. Inspect "
+                "their output and fix failures before proceeding."
             )
         blocked = (
             r"\b(shutdown|restart-computer|stop-computer|diskpart|bcdedit|manage-bde|clear-disk|format-volume|remove-partition)\b",
@@ -969,6 +1023,7 @@ class CodingAgent:
                     raise AgentError("Coding session stopped during provider retry.") from error
     def _run_openai(self, prompt: str) -> str:
         history: list[dict] = [{"role": "user", "content": prompt}]
+        prose_only_rounds = 0
         for round_number in range(1, MAX_AGENT_ROUNDS + 1):
             self._check_cancelled()
             self.status(f"Analysing project — agent round {round_number}/{MAX_AGENT_ROUNDS}")
@@ -985,7 +1040,30 @@ class CodingAgent:
             message = response.choices[0].message
             history.append(message.model_dump(exclude_none=True))
             if not message.tool_calls:
-                return message.content or "The model returned an empty response."
+                if self.implementation_complete:
+                    return message.content or "Implementation is complete."
+                prose_only_rounds += 1
+                self.status(
+                    "The provider returned text without performing a coding action. "
+                    "Implementation is still incomplete; requesting tool-based continuation."
+                )
+                if prose_only_rounds >= 2:
+                    raise AgentError(
+                        "The provider repeatedly returned prose without using coding tools. "
+                        "The task remains PAUSED, not completed; its checkpoint is preserved."
+                    )
+                history.append({
+                    "role": "user",
+                    "content": (
+                        "Your previous response did not execute any coding tools. This is not "
+                        "a completed task. Continue implementation now: inspect relevant files, "
+                        "update the ordered file plan, make actual file changes using coding tools, "
+                        "validate them, and call complete_implementation only after every planned "
+                        "file is verified. Do not return another architecture proposal."
+                    ),
+                })
+                continue
+            prose_only_rounds = 0
             for call in message.tool_calls:
                 self._check_cancelled()
                 try:
@@ -1021,6 +1099,7 @@ class CodingAgent:
 
     def _run_anthropic(self, prompt: str) -> str:
         history: list[dict] = [{"role": "user", "content": prompt}]
+        prose_only_rounds = 0
         for round_number in range(1, MAX_AGENT_ROUNDS + 1):
             self._check_cancelled()
             self.status(f"Analysing project — agent round {round_number}/{MAX_AGENT_ROUNDS}")
@@ -1052,8 +1131,32 @@ class CodingAgent:
                     })
 
             if not tool_results:
-                return "\n".join(text_parts) or "The model returned an empty response."
+                if self.implementation_complete:
+                    return "\n".join(text_parts) or "Implementation is complete."
+                prose_only_rounds += 1
+                self.status(
+                    "The provider returned text without performing a coding action. "
+                    "Implementation is still incomplete; requesting tool-based continuation."
+                )
+                if prose_only_rounds >= 2:
+                    raise AgentError(
+                        "The provider repeatedly returned prose without using coding tools. "
+                        "The task remains PAUSED, not completed; its checkpoint is preserved."
+                    )
+                history.append({"role": "assistant", "content": response.content})
+                history.append({
+                    "role": "user",
+                    "content": (
+                        "Your previous response did not execute any coding tools. This is not "
+                        "a completed task. Continue implementation now: inspect relevant files, "
+                        "make actual file changes using coding tools, validate them, and call "
+                        "complete_implementation only after every planned file is verified. "
+                        "Do not return another architecture proposal."
+                    ),
+                })
+                continue
 
+            prose_only_rounds = 0
             history.append({"role": "assistant", "content": response.content})
             if round_number % CONTINUATION_INTERVAL == 0 and round_number < MAX_AGENT_ROUNDS:
                 phase = round_number // CONTINUATION_INTERVAL + 1
@@ -1084,6 +1187,11 @@ class CodingAgent:
                 result = self._run_anthropic(effective_prompt)
             else:
                 result = self._run_openai(effective_prompt)
+            if not self.implementation_complete:
+                raise AgentError(
+                    "The provider stopped before implementation verification completed. "
+                    "Progress is paused and preserved; the task has not been marked complete."
+                )
             self.progress["status"] = "completed"
             self.progress["completed_at"] = datetime.now(timezone.utc).isoformat()
             self.progress["final_summary"] = result[-4000:]

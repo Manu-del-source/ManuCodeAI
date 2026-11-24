@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
-from desktop.agent import CodingAgent
+from desktop.agent import AgentError, CodingAgent
 
 
 class CodingAgentPathTests(unittest.TestCase):
@@ -68,6 +71,115 @@ class CodingAgentPathTests(unittest.TestCase):
         self.assertNotIn(".env", listing)
         self.assertNotIn(".git/config", listing)
         self.assertNotIn("do-not-read", listing)
+
+
+
+    def test_completed_file_cannot_be_downgraded_to_in_progress(self) -> None:
+        self.agent.file_manifest = {
+            "task_hash": "test",
+            "files": {
+                "src/example.py": {
+                    "status": "COMPLETED",
+                    "verified_sha256": "abc",
+                }
+            },
+        }
+        self.agent.manifest_path = self.workspace / ".manucodeai" / "file_manifest.json"
+        self.agent.progress_path = self.workspace / ".manucodeai" / "progress.json"
+        self.agent.progress = {}
+        self.agent._completed_files = {"src/example.py"}
+        result = self.agent._update_file_status(
+            "src/example.py", "IN_PROGRESS", "start editing again"
+        )
+        self.assertIn("cannot be reopened or downgraded", result.lower())
+        self.assertEqual(
+            self.agent.file_manifest["files"]["src/example.py"]["status"],
+            "COMPLETED",
+        )
+
+    def test_plan_order_prevents_starting_later_file(self) -> None:
+        self.agent.file_manifest = {
+            "files": {
+                "first.py": {"status": "IN_PROGRESS"},
+                "second.py": {"status": "NOT_STARTED"},
+            }
+        }
+        self.agent.manifest_path = self.workspace / ".manucodeai" / "file_manifest.json"
+        self.agent.progress_path = self.workspace / ".manucodeai" / "progress.json"
+        self.agent.progress = {}
+        self.agent._completed_files = set()
+        result = self.agent._update_file_status(
+            "second.py", "IN_PROGRESS", "start second file"
+        )
+        self.assertIn("finish first.py before starting second.py", result)
+        self.assertEqual(
+            self.agent.file_manifest["files"]["second.py"]["status"],
+            "NOT_STARTED",
+        )
+
+
+class CodingAgentToolLoopTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.agent = object.__new__(CodingAgent)
+        self.agent.workspace = Path(self.temp_dir.name).resolve()
+        self.agent.cancel_event = threading.Event()
+        self.agent.provider = "OpenRouter"
+        self.agent.model = "openrouter/free"
+        self.agent.status = lambda _message: None
+        self.agent.implementation_complete = False
+        self.agent.progress = {"events": []}
+        self.agent.progress_path = self.agent.workspace / ".manucodeai" / "progress.json"
+        self.agent.client = Mock()
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    @staticmethod
+    def _message(content=None, tool_calls=None):
+        return SimpleNamespace(
+            content=content,
+            tool_calls=tool_calls or [],
+            model_dump=lambda exclude_none=True: {
+                "role": "assistant",
+                "content": content,
+            },
+        )
+
+    @staticmethod
+    def _response(message):
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    def test_prose_response_does_not_finish_before_tool_execution(self) -> None:
+        completion_call = SimpleNamespace(
+            id="call-complete",
+            function=SimpleNamespace(
+                name="complete_implementation",
+                arguments='{"planned_files":["sample.py"]}',
+            ),
+        )
+        self.agent.client.chat.completions.create.side_effect = [
+            self._response(self._message("Here is the architecture.")),
+            self._response(self._message(tool_calls=[completion_call])),
+            self._response(self._message("Implementation verified.")),
+        ]
+
+        def execute_tool(_name, _arguments):
+            self.agent.implementation_complete = True
+            return "Implementation gate passed."
+
+        self.agent._execute_tool = execute_tool
+        result = self.agent._run_openai("Build the application")
+        self.assertEqual(result, "Implementation verified.")
+        self.assertEqual(self.agent.client.chat.completions.create.call_count, 3)
+
+    def test_repeated_prose_response_pauses_instead_of_reporting_success(self) -> None:
+        self.agent.client.chat.completions.create.side_effect = [
+            self._response(self._message("Architecture proposal.")),
+            self._response(self._message("Another architecture proposal.")),
+        ]
+        with self.assertRaisesRegex(AgentError, "task remains PAUSED"):
+            self.agent._run_openai("Build the application")
 
 
 if __name__ == "__main__":
