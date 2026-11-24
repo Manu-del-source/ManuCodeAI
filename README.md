@@ -1,126 +1,132 @@
 # ManuCodeAI
 
-AI coding agent with a standalone desktop application for Windows and Linux, using Visual Studio Code as the visible editor.
+ManuCodeAI is a **standalone Windows and Linux desktop coding agent**. It uses Visual Studio Code as the visible editor and types generated code progressively so you can watch each change. It is not a VS Code extension.
 
-## Standalone desktop application
+## Features
 
-The desktop app is the primary autonomous workflow. It plans only the files that need changes, processes them in order, types changes visibly in VS Code at a deliberately paced and configurable rate, saves and verifies each file, and persists progress under `.manucodeai/` in the selected project.
+- Desktop interface built with PySide6.
+- OpenAI-compatible providers: AgentRouter, Gemini, OpenRouter, and compatible custom endpoints.
+- Anthropic-compatible Coarena provider.
+- Provider-specific API keys stored in the operating system credential store through keyring.
+- Model discovery where the provider exposes a compatible model-list endpoint; manual model IDs are supported.
+- Select an existing project folder and give the agent a coding task.
+- Project discovery, file reading, ordered file plans, targeted edits, and new-file creation.
+- Visible, paced typing in VS Code; no silent direct writes of generated source code.
+- Automatic save and read-back verification after each file.
+- Persistent task progress and file manifest under `.manucodeai/` in the selected project.
+- Bounded retries for transient provider/network failures.
+- Stop button and Windows global emergency shortcut (Ctrl+Shift+X).
+- Workspace-boundary checks and protection for common secret files.
+- Automated Python tests and cross-platform CI.
 
-### Windows
+## Requirements
 
-Install Python 3.11 or newer and Visual Studio Code. Ensure the `code` command is available on PATH.
+- Python 3.11 or newer.
+- Visual Studio Code installed, with the `code` command available on PATH.
+- A supported AI provider API key and a model ID.
+- Windows 10/11 or Linux desktop session.
+
+### Linux input dependencies
+
+The Linux visible-typing backend requires `xdotool` and a clipboard utility.
+
+Fedora KDE/X11:
+
+```bash
+sudo dnf install xdotool xclip
+```
+
+Wayland:
+
+```bash
+sudo dnf install xdotool wl-clipboard
+```
+
+The current Linux focus backend depends on the VS Code window being visible to `xdotool`. Some native Wayland configurations prevent external window activation; ManuCodeAI should stop rather than type into an unverified window.
+
+## Install and run from source
+
+### Windows PowerShell
 
 ```powershell
-py -m venv .venv
+py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-py -m pip install -r requirements.txt
-py -m desktop.app
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -r desktop\requirements.txt
+python run_desktop.py
 ```
 
 ### Linux
 
-Install Python 3.11 or newer, Visual Studio Code, and the visible-input utilities for your desktop session.
-
-For Fedora KDE/X11:
-
 ```bash
-sudo dnf install xdotool xclip
-python3 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-python -m desktop.app
+python -m pip install -r desktop/requirements.txt
+python run_desktop.py
 ```
 
-For a Wayland session, install `xdotool` and `wl-clipboard` (`wl-copy` and `wl-paste`). VS Code must be exposed through XWayland for the current focus-detection backend to activate and confirm its window. A native-Wayland VS Code window may not be visible to `xdotool`; in that case the current build will stop safely rather than send keystrokes to an unverified window.
+## Configure and use
 
-The Windows backend uses native keyboard input. The Linux backend uses `xdotool` and the session clipboard. Both retain the same adjustable natural typing delays and literal newline/tab insertion.
+1. Start ManuCodeAI.
+2. Select the AI provider.
+3. Enter the provider API key.
+4. Fetch available models or enter the exact model ID manually.
+5. Select the project folder.
+6. Describe the requested change, including relevant requirements and constraints.
+7. Select **Start coding**. ManuCodeAI opens the project in VS Code and works through its ordered plan.
+8. Use **Stop** or press **Ctrl+Shift+X** on Windows to interrupt an active task.
 
+API keys are stored using the OS credential store when available. They are not written to the selected project or the progress manifest. If secure credential storage is unavailable, ManuCodeAI reports that the key cannot be persisted.
 
-## Architecture
+## Provider notes
 
-- `server/api.py` — FastAPI backend exposing `/health`, `/chat`, `/agent`, and streaming `/agent/stream` (SSE).
-- `vscode-extension/` — VS Code extension. Generated code streams progressively into native editor tabs (untitled in-memory documents), per file, with approval (native diff + modal) before anything touches the workspace.
-- `main.py` — original terminal agent (preserved).
+| Provider | API protocol | Model discovery |
+| --- | --- | --- |
+| AgentRouter | OpenAI-compatible | Fetch models |
+| Gemini | OpenAI-compatible chat endpoint | Gemini model-list endpoint |
+| OpenRouter | OpenAI-compatible | Fetch models |
+| Coarena | Anthropic Messages API | Enter model ID manually |
 
-### Extension structure
+For compatible custom providers, choose the closest matching protocol and supply the endpoint and model ID. Provider compatibility depends on the provider implementing the relevant API and tool-calling behavior.
 
-- `src/core/` — pure, VS Code-free modules (unit-tested with `node --test`):
-  - `partialArgumentsParser.ts` — incremental, escape-aware parser for partial JSON tool arguments (any key order, malformed-safe, no raw JSON fragments).
-  - `previewTracker.ts` — per-file generation state (streaming → ready → cancelled / applied / rejected).
-  - `typewriter.ts` — human-like typing pace for the preview editor (queue, tiny chunks, per-file cancellation).
-  - `agentStreamRunner.ts` — parses the backend SSE stream and drives the tracker.
-  - `fileOps.ts` — the only workspace writers (read/write/conflict detection).
-  - `approval.ts` / `language.ts` — approval decisions and path → language mapping.
-- `src/previewManager.ts` — VS Code glue: untitled documents, native tabs, paced (human-like) reveal updates, cancellation status.
-- `src/extension.ts` — wiring: SSE consumption, approval flow, webview sidebar.
+## Progress and recovery
 
-### Preview → approval pipeline
+The selected project receives a `.manucodeai/` directory containing a progress checkpoint and file manifest. These files track task state, planned files, verification hashes, and limited tool-event metadata. They do not intentionally store API keys or full command output.
 
-1. The backend streams `tool_call_start`, `tool_call_delta` (raw argument fragments), `tool_call`, `done`.
-2. The extension opens one untitled preview tab per `write_file` and types the incoming characters into it at the configured human-like speed. The stream itself is consumed at full speed — only the editor rendering is paced.
-3. When the stream completes and the typing finishes, a native diff (original vs proposed) is shown; the user approves or rejects.
-4. Approved changes are written — with an external-modification conflict check — and the workspace file is opened.
-5. Rejected changes leave the workspace byte-identical; cancelled generation marks the preview incomplete and never executes writes.
+Starting the same unfinished prompt in the same project can resume from the saved checkpoint. The agent reconciles completed-file hashes against the current workspace before treating earlier work as complete.
 
-## Typing speed
+The default agent safety limit is 60 model rounds. Set `MANUCODE_MAX_ROUNDS` before launching to change it (minimum 12).
 
-Generated code is revealed in the preview editor at a human-like pace instead of appearing in large batches. The pace applies to editor rendering only — the AI's generation and the SSE stream are never slowed down.
+## Development and verification
 
-| Setting | Characters per second |
-| --- | --- |
-| `manucodeai.typingSpeed` = `slow` | 15 |
-| `manucodeai.typingSpeed` = `normal` (default) | 35 |
-| `manucodeai.typingSpeed` = `fast` | 70 |
-
-Set it in **Settings → ManuCodeAI → Typing Speed** (`settings.json`: `"manucodeai.typingSpeed": "normal"`). Changes apply immediately, including to text already queued for an in-flight preview.
-
-Pressing **Stop** halts the visual typing immediately: queued characters are dropped, pending reveal timers are cleared, and no further editor updates are applied. Characters already shown stay in the preview for reference (the incomplete preview is never written).
-
-## Start the Python API
+Install both dependency sets, then run:
 
 ```bash
-cd C:\Users\VISITOR\ManuCodeAI
-.venv\Scripts\python.exe -m uvicorn server.api:app --host 127.0.0.1 --port 8765
+python -m compileall -q desktop
+python -m unittest discover -s tests -v
 ```
 
-Health check:
+GitHub Actions runs the same checks on Windows and Ubuntu for supported Python versions.
 
-```bash
-curl http://127.0.0.1:8765/health
+## Packaging a Windows executable
+
+Install the optional packaging dependency and build on Windows:
+
+```powershell
+python -m pip install pyinstaller
+pyinstaller --noconfirm --clean --windowed --name ManuCodeAI --collect-all PySide6 --collect-all shiboken6 run_desktop.py
 ```
 
-## Compile and package the extension
+The application bundle is written to `dist/ManuCodeAI/`. Build on the target operating system; a Windows executable must be built on Windows and a Linux executable on Linux. VS Code and Linux input utilities remain external prerequisites.
 
-```bash
-cd C:\Users\VISITOR\ManuCodeAI\vscode-extension
-npm.cmd install
-.\node_modules\.bin\tsc.cmd -p tsconfig.json --noEmit
-npm.cmd run compile
-npx vsce package
-```
+## Important behavior and limitations
 
-This produces a `.vsix` file.
-
-## Install the VSIX
-
-In VS Code: Extensions view -> "..." menu -> "Install from VSIX..." -> select the generated `.vsix`.
-
-## Streaming event protocol
-
-SSE events from `/agent/stream`:
-
-- `start` — stream began
-- `delta` — assistant text chunk `{ content }`
-- `tool_call_start` — a new tool call began `{ index, id, name }`
-- `tool_call_delta` — partial tool call `{ index, id, name, arguments_delta }` (raw JSON fragments; the extension decodes them incrementally)
-- `tool_call` — complete validated tool call `{ index, id, name, arguments }`
-- `done` — `{ finished, tool_calls, response }`
-- `cancelled` — stream aborted
-- `error` — `{ message }`
-
-## Security notes
-
-- API binds to localhost by default.
-- `.env` and secret files are never read or modified.
-- File writes and command execution require explicit user approval.
-- Workspace boundaries are enforced.
+- ManuCodeAI is a standalone desktop application; there is no `vscode-extension/` component.
+- Generated source changes are entered visibly through the selected VS Code window. Keep that window available and do not manually edit the same file during an active write.
+- The global Ctrl+Shift+X emergency shortcut is currently Windows-only. The on-screen Stop button is available on both supported platforms.
+- Linux visible typing depends on the active display server, window focus permissions, `xdotool`, and a supported clipboard utility.
+- Model names, tool calling, rate limits, and availability are controlled by the selected provider.
+- Review generated code and test results before using changes in production.

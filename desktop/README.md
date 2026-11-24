@@ -1,91 +1,69 @@
-# ManuCodeAI Desktop (Windows)
+# ManuCodeAI Desktop
 
-This is the standalone Windows application. Users configure an AI provider,
-select a project folder, and enter instructions here. VS Code is launched as
-the editor; no ManuCodeAI VS Code extension is required for this workflow.
+This directory contains the standalone Windows and Linux desktop application. It is the primary coding workflow; it does not require or use a VS Code extension.
 
-## Supported providers
+## Current capabilities
 
-### AgentRouter
+- PySide6 desktop interface.
+- AgentRouter, Gemini, OpenRouter, and custom OpenAI-compatible endpoints.
+- Coarena through the Anthropic Messages API.
+- Provider model discovery where supported and manual model ID entry.
+- OS credential-store integration for provider API keys.
+- Project-folder selection and task input.
+- Project inspection, ordered file plans, new-file creation, and targeted edits.
+- Visible progressive typing in VS Code, save, and read-back verification.
+- Persistent progress checkpoints and file manifests.
+- Bounded retries for transient provider failures.
+- Stop button and Windows Ctrl+Shift+X emergency stop.
 
-- Protocol: OpenAI-compatible Chat Completions
-- Base URL: `https://agentrouter.org/v1`
-- API key: AgentRouter API key
-- Model: select **Fetch models** to retrieve IDs exposed to your key, or enter
-  a model ID manually.
-- Supports tool calls through the OpenAI-compatible endpoint.
+## Install
 
-### Coarena
-
-- Protocol: Anthropic Messages API
-- Base URL: `https://coarena.ai/api` (matching the Anthropic-compatible
-  environment configuration used by Coarena)
-- API key: Coarena `coa_...` token
-- Model: enter the exact model ID enabled for your account.
-- Uses the Anthropic SDK rather than sending the Coarena token to OpenAI's API.
-
-The provider selector keeps separate API keys in the operating system
-credential store. The API key is not written to project files or settings.
-
-## Current foundation
-
-- Native desktop UI built with PySide6.
-- AgentRouter and Coarena provider selection.
-- AgentRouter model discovery through its OpenAI-compatible `/models` endpoint.
-- Editable model field for manually entering provider model IDs.
-- API-key persistence through the operating system credential store (keyring).
-- Project-folder selection.
-- Coding agent with project listing, file reading, autonomous file changes, and
-  automatic PowerShell command execution.
-- VS Code launcher using the `code` command.
-- Native Windows `SendInput` Unicode typing, with variable character delays.
-- Global emergency stop: press `Ctrl+Shift+X` from any application to stop typing and cancel the active coding session; the on-screen Stop button remains available as a fallback.
-- Python files are syntax-checked before typing and checked again after saving; typing progress is reported in the activity log.
-- File changes and project commands run automatically without per-action approval prompts.
-
-## Development setup
-
-From the repository root in PowerShell:
+From the repository root:
 
 ```powershell
-py -m venv .venv
+py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-py -m pip install -r requirements.txt
-py -m pip install -r desktop\requirements.txt
-py -m desktop.app
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -r desktop\requirements.txt
+python run_desktop.py
 ```
 
-VS Code must be installed and its `code` command must be available on PATH.
+On Linux, install `xdotool` and a clipboard utility first, then use the equivalent `python3.11 -m venv`, `source .venv/bin/activate`, and `pip install` commands. Fedora KDE/X11 users can install `xdotool` and `xclip`; Wayland users need `xdotool` and `wl-clipboard`, and must run VS Code in a window that the current focus backend can detect.
 
-## Autonomous long-task continuation
+## Providers
 
-- The coding agent supports up to 60 model rounds by default, split into continuation
-  phases every 12 rounds. It continues the same conversation instead of stopping at
-  the former 12-round ceiling.
-- A compact checkpoint is stored in `.manucodeai/progress.json` inside the selected
-  project. It records the original task and tool/file activity, but does not store
-  terminal output, API keys, or command arguments.
-- If the app is stopped or the round safety limit is reached, starting the exact same
-  task again in the same project resumes from the checkpoint. The agent must inspect
-  current files before repeating work.
-- Set `MANUCODE_MAX_ROUNDS` before launching the app to change the limit. The minimum
-  supported value is 12; the default is 60.
+| Provider | Protocol | Discovery |
+| --- | --- | --- |
+| AgentRouter | OpenAI-compatible | Automatic |
+| Gemini | OpenAI-compatible | Gemini API model list |
+| OpenRouter | OpenAI-compatible | Automatic |
+| Coarena | Anthropic Messages | Manual model ID |
 
-## Important limitations
+The API key is saved to the operating system credential store when keyring is available. Provider settings such as base URL and model ID are stored through QSettings. Do not put API keys in project files.
 
-- The app targets Windows.
-- The first release uses non-streaming tool-call responses, then types each
-  approved file into VS Code at a steady human-readable pace.
-- Model availability depends on the API key and provider account.
-- Coarena model discovery is manual in this version; enter the model ID given
-  by Coarena.
-- VS Code must be the foreground application when typing begins. Avoid typing
-  into the editor during an active automated write; `Ctrl+Shift+X` is reserved as
-  the global emergency stop shortcut and can be pressed at any time.
-- The agent runs autonomously inside the selected project. It blocks selected high-risk
-  system administration commands and protects secret files and paths outside the project.
-- Registration, packaged installer work, and richer model capability checks
-  remain future tasks.
+## Task recovery
 
-The original Python terminal agent and existing backend/extension are preserved
-while this standalone application is developed on its own branch.
+The selected project stores `.manucodeai/progress.json` and `.manucodeai/file_manifest.json`. These record the task checkpoint, ordered file plan, and verification state. On restart, the agent reconciles saved file hashes and resumes unfinished work rather than blindly repeating successful writes.
+
+Set `MANUCODE_MAX_ROUNDS` before launching to change the default 60-round safety limit (minimum 12).
+
+## Tests
+
+From the repository root:
+
+```powershell
+python -m compileall -q desktop
+python -m unittest discover -s tests -v
+```
+
+## Packaging
+
+Build on the target operating system:
+
+```powershell
+python -m pip install pyinstaller
+pyinstaller --noconfirm --clean --windowed --name ManuCodeAI --collect-all PySide6 --collect-all shiboken6 run_desktop.py
+```
+
+The output is in `dist/ManuCodeAI/`. VS Code and platform-specific visible-input utilities are external prerequisites and are not bundled.
