@@ -54,6 +54,46 @@ class CodingAgentPathTests(unittest.TestCase):
         self.assertEqual(self.agent._read_file("sample.txt"), "hello")
         self.assertIn("sample.txt", self.agent._read_since_write)
 
+    def test_malformed_python_is_rejected_before_visible_typing(self) -> None:
+        self.agent.cancel_event = threading.Event()
+        self.agent.status = Mock()
+        self.agent.vscode = Mock()
+        self.agent.file_manifest = {
+            "files": {"config.py": {"status": "IN_PROGRESS"}}
+        }
+        self.agent._last_successful_file_change = None
+        self.agent._successful_edits = {}
+        self.agent._full_write_success = set()
+        self.agent._last_written_content = {}
+        self.agent._save_manifest = Mock()
+        malformed = """class Config:
+    MPESA_TRANSACTION_TYPE = _env(
+        "MPESA_TRANSACTION_TYPE", "CustomerPayBillOnline"
+    )
+)    MPESA_MOCK = _env_bool("MPESA_MOCK", True)
+    SUBSCRIPTION_CHECK_INTERVAL = _env_int("SUBSCRIPTION_CHECK_INTERVAL", 60 still making an error)
+"""
+
+        result = self.agent._write_file("config.py", malformed)
+
+        self.assertIn("Python syntax validation failed", result)
+        self.assertIn("The file was NOT written", result)
+        self.assertFalse((self.workspace / "config.py").exists())
+        self.agent.vscode.write_file_visibly.assert_not_called()
+
+    def test_run_command_blocks_direct_source_file_writes(self) -> None:
+        self.agent.cancel_event = threading.Event()
+        self.agent.status = Mock()
+        self.agent.workspace = self.workspace
+        self.agent.implementation_complete = False
+
+        result = self.agent._run_command(
+            "Set-Content -Path config.py -Value 'broken code'"
+        )
+
+        self.assertIn("Blocked", result)
+        self.assertIn("write_file/edit_file", result)
+
     def test_read_file_rejects_non_utf8_without_crashing(self) -> None:
         (self.workspace / "binary.dat").write_bytes(b"\xff\xfe\xfd")
         self.assertEqual(

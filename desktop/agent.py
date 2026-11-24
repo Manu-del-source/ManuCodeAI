@@ -725,7 +725,8 @@ class CodingAgent:
         if path.suffix.lower() == ".py":
             try:
                 ast.parse(content, filename=relative)
-                self.status(f"Python preflight passed: {relative} — no syntax or indentation errors detected.")
+                compile(content, relative, "exec", dont_inherit=True)
+                self.status(f"Python preflight passed: {relative} — syntax and compilation checks passed.")
             except SyntaxError as error:
                 location = f"line {error.lineno}" if error.lineno else "unknown line"
                 if error.offset:
@@ -794,7 +795,8 @@ class CodingAgent:
         if path.suffix.lower() == ".py":
             try:
                 ast.parse(saved_content, filename=relative)
-                self.status(f"Python post-save check passed: {relative}.")
+                compile(saved_content, relative, "exec", dont_inherit=True)
+                self.status(f"Python post-save syntax and compilation checks passed: {relative}.")
             except SyntaxError as error:
                 manifest_entry["write_attempt"]["state"] = "VALIDATION_FAILED"
                 manifest_entry["verification_or_reason"] = (
@@ -931,6 +933,22 @@ class CodingAgent:
 
     def _run_command(self, command: str) -> str:
         self._check_cancelled()
+        # Source files must only be changed through write_file/edit_file so the
+        # preflight validators and visible VS Code typing cannot be bypassed.
+        mutation_patterns = (
+            r"\b(?:set-content|add-content|out-file|clear-content)\b",
+            r"\b(?:tee|sed\s+-i|perl\s+-i)\b",
+            r"\b(?:git\s+apply|git\s+checkout\s+--|git\s+restore)\b",
+            r"(?:^|[;&|]\s*)(?:[^\n;&|]+\s)?(?:>|>>)\s*[^\s]+",
+            r"\bpython(?:\s+-[a-zA-Z]+)*\s+-c\b.*\bopen\s*\(",
+        )
+        if any(re.search(pattern, command, re.IGNORECASE) for pattern in mutation_patterns):
+            return (
+                "Blocked: do not modify project files through terminal commands, shell "
+                "redirection, PowerShell content commands, sed/Perl, or git patch commands. "
+                "Use write_file/edit_file so source changes are visibly typed and validated "
+                "before they reach the project."
+            )
         startup_patterns = (
             r"\buvicorn\b",
             r"\b(?:npm|pnpm|yarn)\s+run\s+(?:dev|start)\b",
