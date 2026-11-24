@@ -768,16 +768,28 @@ class ManuCodeAIProvider implements vscode.WebviewViewProvider {
 
         const workspaceRoot = this.getWorkspaceRoot();
 
-        const choice = await vscode.window.showWarningMessage(
-            `Execute this command in the workspace?\n\n${command}`,
-            { modal: true },
-            "Run",
-            "Cancel",
-        );
-
-        if (choice !== "Run") {
-            return "Command rejected by the user.";
+        // Execute ordinary development commands autonomously. Block a small
+        // set of clearly destructive system/repository/database operations
+        // rather than interrupting every normal build, test or install.
+        const normalized = command.toLowerCase();
+        const blockedPatterns = [
+            /\brm\s+-rf\b/,
+            /\brmdir\s+\/s\b/,
+            /\bdel\s+\/f\s+\/s\b/,
+            /\bremove-item\b.*\b-recurse\b.*\b-force\b/,
+            /\bformat\s+[a-z]:/ ,
+            /\bdiskpart\b/,
+            /\b(shutdown|restart-computer|stop-computer|reboot)\b/,
+            /\bgit\s+reset\s+--hard\b/,
+            /\bgit\s+clean\s+-[a-z]*f/,
+            /\bdrop\s+(database|schema|table)\b/,
+            /\btruncate\s+table\b/,
+        ];
+        if (blockedPatterns.some(pattern => pattern.test(normalized))) {
+            return "Blocked potentially destructive command. No command was executed. Use a targeted, reversible operation instead.";
         }
+
+        this.send(view, "Progress", `Running automatically: ${command}`);
 
         try {
             const { stdout, stderr } = await execAsync(command, {
