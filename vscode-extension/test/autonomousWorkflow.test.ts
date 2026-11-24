@@ -1,11 +1,14 @@
-import test from "node:test";
+import { before, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 // These source-contract tests protect the user's autonomous workflow from
 // regressions back to per-file approval dialogs or silent unsafe overwrites.
-const extensionSource = await readFile(resolve(process.cwd(), "src/extension.ts"), "utf8");
+let extensionSource = "";
+before(async () => {
+    extensionSource = await readFile(resolve(process.cwd(), "src/extension.ts"), "utf8");
+});
 
 test("generated files are saved without approval dialogs", () => {
     assert.match(extensionSource, /private async autoSavePreview\(/);
