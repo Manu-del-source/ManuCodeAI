@@ -25,6 +25,23 @@ def create_tables() -> None:
     Base.metadata.create_all(bind=engine)
 
 
+@app.get("/", response_class=HTMLResponse)
+def root() -> str:
+    return """<!doctype html><nhtml lang="en"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>ManuCodeAI Licensing API</title><style>
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;
+    padding:24px;background:#0d0f12;color:#eceef2;font:16px Inter,Segoe UI,sans-serif}
+    main{width:min(100%,620px);padding:32px;background:#15181d;border:1px solid #30343c;
+    border-radius:16px}h1{margin-top:0}h1 span{color:#c49a52}p{color:#aeb5c0;line-height:1.6}
+    a{color:#e1bf7c;text-decoration:none}a:hover{text-decoration:underline}.status{color:#91d6a5}
+    </style></head><body><main><h1>ManuCodeAI <span>API</span></h1>
+    <p class="status">● Service is online</p>
+    <p>This service handles ManuCodeAI authentication, licensing and billing.</p>
+    <p><a href="/health">Health status</a> · <a href="/api/docs">API documentation</a> · <a href="/admin">Administrator dashboard</a></p>
+    </main></body></html>"""
+
+
 @app.get("/health")
 def health() -> dict:
     return {"service": "manucodeai-licensing", "status": "ok"}
