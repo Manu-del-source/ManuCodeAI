@@ -1,33 +1,40 @@
 """FastAPI service for Clerk authentication, trials, Paystack, and admin controls."""
 from __future__ import annotations
+
 import json
 from datetime import datetime, timedelta, timezone
+
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+
 from .auth import Identity, require_admin, require_identity
 from .config import settings
 from .database import Base, engine, get_db
-from .entitlements import entitlement_payload, get_or_create_account
+from .entitlements import as_utc, entitlement_payload, get_or_create_account
 from .models import Account, Payment
 from .payments import apply_successful_payment, initialize_checkout, valid_webhook_signature
 
 app = FastAPI(title="ManuCodeAI Licensing API", version="1.0.0", docs_url="/api/docs", redoc_url=None)
 
+
 @app.on_event("startup")
 def create_tables() -> None:
     Base.metadata.create_all(bind=engine)
+
 
 @app.get("/health")
 def health() -> dict:
     return {"service": "manucodeai-licensing", "status": "ok"}
 
+
 @app.get("/api/v1/me")
 def get_my_entitlement(identity: Identity = Depends(require_identity), db: Session = Depends(get_db)) -> dict:
     account = get_or_create_account(db, identity.user_id, identity.email)
     return entitlement_payload(account, identity.is_admin)
+
 
 @app.post("/api/v1/billing/checkout")
 def create_checkout(identity: Identity = Depends(require_identity), db: Session = Depends(get_db)) -> dict:
@@ -36,9 +43,26 @@ def create_checkout(identity: Identity = Depends(require_identity), db: Session 
         raise HTTPException(status_code=403, detail="This account is suspended.")
     return initialize_checkout(db, account)
 
+
+@app.get("/api/v1/billing/payments")
+def my_payments(identity: Identity = Depends(require_identity), db: Session = Depends(get_db)) -> list[dict]:
+    account = get_or_create_account(db, identity.user_id, identity.email)
+    rows = db.scalars(
+        select(Payment).where(Payment.account_id == account.id)
+        .order_by(Payment.created_at.desc()).limit(50)
+    )
+    return [{
+        "reference": row.reference, "amount_kes": row.amount / 100,
+        "currency": row.currency, "status": row.status,
+        "created_at": row.created_at.isoformat(),
+        "paid_at": row.paid_at.isoformat() if row.paid_at else None,
+    } for row in rows]
+
+
 @app.post("/api/v1/paystack/webhook")
 async def paystack_webhook(
-    request: Request, x_paystack_signature: str | None = Header(default=None),
+    request: Request,
+    x_paystack_signature: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> dict:
     raw_body = await request.body()
@@ -55,6 +79,7 @@ async def paystack_webhook(
         apply_successful_payment(db, reference)
     return {"received": True}
 
+
 @app.get("/api/v1/admin/overview")
 def admin_overview(_: Identity = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     now = datetime.now(timezone.utc)
@@ -67,8 +92,11 @@ def admin_overview(_: Identity = Depends(require_admin), db: Session = Depends(g
     revenue = db.scalar(select(func.coalesce(func.sum(Payment.amount), 0)).where(
         Payment.status == "success"
     )) or 0
-    return {"total_users": total, "paying_users": paying, "trial_users": trials,
-            "successful_payments": paid_count, "revenue_kes": revenue / 100}
+    return {
+        "total_users": total, "paying_users": paying, "trial_users": trials,
+        "successful_payments": paid_count, "revenue_kes": revenue / 100,
+    }
+
 
 @app.get("/api/v1/admin/users")
 def admin_users(
@@ -77,21 +105,48 @@ def admin_users(
     rows = db.scalars(select(Account).order_by(Account.created_at.desc()).limit(min(max(limit, 1), 500)))
     now = datetime.now(timezone.utc)
     return [{
-        "user_id": a.clerk_user_id, "email": a.email, "created_at": a.created_at.isoformat(),
-        "trial_ends_at": a.trial_ends_at.isoformat(),
-        "paid_until": a.paid_until.isoformat() if a.paid_until else None,
-        "suspended": a.suspended,
-        "status": ("suspended" if a.suspended else "subscribed" if a.paid_until and a.paid_until > now
-                   else "trial" if a.trial_ends_at > now else "expired"),
-    } for a in rows]
+        "user_id": account.clerk_user_id,
+        "email": account.email,
+        "created_at": as_utc(account.created_at).isoformat(),
+        "trial_ends_at": as_utc(account.trial_ends_at).isoformat(),
+        "paid_until": as_utc(account.paid_until).isoformat() if account.paid_until else None,
+        "suspended": account.suspended,
+        "status": (
+            "suspended" if account.suspended else
+            "subscribed" if account.paid_until and as_utc(account.paid_until) > now else
+            "trial" if as_utc(account.trial_ends_at) > now else "expired"
+        ),
+    } for account in rows]
+
+
+@app.get("/api/v1/admin/payments")
+def admin_payments(
+    _: Identity = Depends(require_admin), db: Session = Depends(get_db), limit: int = 200,
+) -> list[dict]:
+    rows = db.scalars(
+        select(Payment).order_by(Payment.created_at.desc()).limit(min(max(limit, 1), 500))
+    )
+    return [{
+        "reference": payment.reference,
+        "email": payment.account.email,
+        "amount_kes": payment.amount / 100,
+        "currency": payment.currency,
+        "status": payment.status,
+        "created_at": as_utc(payment.created_at).isoformat(),
+        "paid_at": as_utc(payment.paid_at).isoformat() if payment.paid_at else None,
+    } for payment in rows]
+
 
 class UserAccessUpdate(BaseModel):
     suspended: bool | None = None
 
+
 @app.patch("/api/v1/admin/users/{clerk_user_id}")
 def update_user_access(
-    clerk_user_id: str, payload: UserAccessUpdate,
-    _: Identity = Depends(require_admin), db: Session = Depends(get_db),
+    clerk_user_id: str,
+    payload: UserAccessUpdate,
+    _: Identity = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> dict:
     account = db.scalar(select(Account).where(Account.clerk_user_id == clerk_user_id))
     if not account:
@@ -101,23 +156,29 @@ def update_user_access(
     db.commit()
     return {"user_id": account.clerk_user_id, "suspended": account.suspended}
 
+
 class GrantAccess(BaseModel):
     days: int = Field(ge=1, le=3650)
 
+
 @app.post("/api/v1/admin/users/{clerk_user_id}/grant")
 def grant_user_access(
-    clerk_user_id: str, payload: GrantAccess,
-    _: Identity = Depends(require_admin), db: Session = Depends(get_db),
+    clerk_user_id: str,
+    payload: GrantAccess,
+    _: Identity = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> dict:
     account = db.scalar(select(Account).where(Account.clerk_user_id == clerk_user_id))
     if not account:
         raise HTTPException(status_code=404, detail="User not found.")
     now = datetime.now(timezone.utc)
-    base = account.paid_until if account.paid_until and account.paid_until > now else now
+    current_expiry = as_utc(account.paid_until) if account.paid_until else None
+    base = current_expiry if current_expiry and current_expiry > now else now
     account.paid_until = base + timedelta(days=payload.days)
     account.suspended = False
     db.commit()
-    return {"user_id": account.clerk_user_id, "paid_until": account.paid_until.isoformat()}
+    return {"user_id": account.clerk_user_id, "paid_until": as_utc(account.paid_until).isoformat()}
+
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_dashboard() -> str:
@@ -125,25 +186,29 @@ def admin_dashboard() -> str:
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ManuCodeAI Admin</title><style>
 :root{color-scheme:dark;font-family:Inter,Segoe UI,sans-serif;background:#0d0f12;color:#eceef2}
-body{margin:0;padding:32px}.wrap{max-width:1180px;margin:auto}.muted{color:#9ba2ad}h1{font-size:30px}
+body{margin:0;padding:32px}.wrap{max-width:1240px;margin:auto}.muted{color:#9ba2ad}h1{font-size:30px}
 .card{background:#15181d;border:1px solid #2b3038;border-radius:12px;padding:20px;margin:16px 0}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
 .stat strong{display:block;font-size:27px;color:#e1bf7c;margin-top:8px}
-button{background:#c49a52;color:#111;border:0;padding:10px 15px;border-radius:7px;font-weight:700;cursor:pointer}
-table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px;border-bottom:1px solid #30343c;font-size:13px}
-#dashboard{display:none}.scroll{overflow:auto}
+button{background:#c49a52;color:#111;border:0;padding:9px 12px;border-radius:7px;font-weight:700;cursor:pointer}
+button.secondary{background:#343a43;color:#eee}table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:12px;border-bottom:1px solid #30343c;font-size:13px}
+#dashboard{display:none}.scroll{overflow:auto}h2{font-size:18px}
 </style></head><body><main class="wrap"><h1>ManuCodeAI <span style="color:#c49a52">Admin</span></h1>
 <p class="muted">User access, trials, subscriptions and payment overview.</p>
 <section class="card"><div id="signin"></div><button id="load" style="display:none">Refresh dashboard</button><p id="message" class="muted"></p></section>
-<section id="dashboard"><div class="stats" id="stats"></div><section class="card"><h2>Users</h2><div class="scroll"><table><thead><tr><th>Email</th><th>Status</th><th>Trial ends</th><th>Paid until</th><th>Actions</th></tr></thead><tbody id="users"></tbody></table></div></section></section></main>
+<section id="dashboard"><div class="stats" id="stats"></div>
+<section class="card"><h2>Users</h2><div class="scroll"><table><thead><tr><th>Email</th><th>Status</th><th>Trial ends</th><th>Paid until</th><th>Actions</th></tr></thead><tbody id="users"></tbody></table></div></section>
+<section class="card"><h2>Payments</h2><div class="scroll"><table><thead><tr><th>Email</th><th>Reference</th><th>Amount</th><th>Status</th><th>Created</th><th>Paid</th></tr></thead><tbody id="payments"></tbody></table></div></section>
+</section></main>
 <script>
-const publishableKey = __CLERK_PUBLISHABLE_KEY__;
-const message=document.getElementById('message');let clerkToken=null;
+const publishableKey=__CLERK_PUBLISHABLE_KEY__;const message=document.getElementById('message');let clerkToken=null;
 async function api(path,options={}){const r=await fetch(path,{...options,headers:{'Content-Type':'application/json','Authorization':'Bearer '+clerkToken,...(options.headers||{})}});const b=await r.json();if(!r.ok)throw new Error(b.detail||'Request failed');return b;}
 function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-async function loadDashboard(){try{const o=await api('/api/v1/admin/overview'),u=await api('/api/v1/admin/users');
+async function loadDashboard(){try{const [o,u,p]=await Promise.all([api('/api/v1/admin/overview'),api('/api/v1/admin/users'),api('/api/v1/admin/payments')]);
 document.getElementById('stats').innerHTML=[['Users',o.total_users],['Active trials',o.trial_users],['Paying users',o.paying_users],['Successful payments',o.successful_payments],['Revenue','KSh '+o.revenue_kes.toLocaleString()]].map(([k,v])=>'<div class="card stat"><span class="muted">'+k+'</span><strong>'+v+'</strong></div>').join('');
-document.getElementById('users').innerHTML=u.map(x=>'<tr><td>'+esc(x.email)+'</td><td>'+esc(x.status)+'</td><td>'+new Date(x.trial_ends_at).toLocaleString()+'</td><td>'+(x.paid_until?new Date(x.paid_until).toLocaleString():'—')+'</td><td><button onclick="grant(\''+encodeURIComponent(x.user_id)+'\')">Grant 14 days</button> <button onclick="suspend(\''+encodeURIComponent(x.user_id)+'\','+(!x.suspended)+')">'+(x.suspended?'Restore':'Suspend')+'</button></td></tr>').join('');
+document.getElementById('users').innerHTML=u.map(x=>'<tr><td>'+esc(x.email)+'</td><td>'+esc(x.status)+'</td><td>'+new Date(x.trial_ends_at).toLocaleString()+'</td><td>'+(x.paid_until?new Date(x.paid_until).toLocaleString():'—')+'</td><td><button onclick="grant(\''+encodeURIComponent(x.user_id)+'\')">Grant 14 days</button> <button class="secondary" onclick="suspend(\''+encodeURIComponent(x.user_id)+'\','+(!x.suspended)+')">'+(x.suspended?'Restore':'Suspend')+'</button></td></tr>').join('');
+document.getElementById('payments').innerHTML=p.map(x=>'<tr><td>'+esc(x.email)+'</td><td>'+esc(x.reference)+'</td><td>KSh '+x.amount_kes.toLocaleString()+'</td><td>'+esc(x.status)+'</td><td>'+new Date(x.created_at).toLocaleString()+'</td><td>'+(x.paid_at?new Date(x.paid_at).toLocaleString():'—')+'</td></tr>').join('');
 document.getElementById('dashboard').style.display='block';message.textContent='Dashboard refreshed.';}catch(e){message.textContent=e.message;}}
 async function grant(id){try{await api('/api/v1/admin/users/'+decodeURIComponent(id)+'/grant',{method:'POST',body:JSON.stringify({days:14})});await loadDashboard();}catch(e){message.textContent=e.message;}}
 async function suspend(id,v){try{await api('/api/v1/admin/users/'+decodeURIComponent(id),{method:'PATCH',body:JSON.stringify({suspended:v})});await loadDashboard();}catch(e){message.textContent=e.message;}}
