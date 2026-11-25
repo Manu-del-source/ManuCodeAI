@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from .config import settings
+from .entitlements import as_utc
 from .models import Account, Payment
 
 def initialize_checkout(db: Session, account: Account) -> dict:
@@ -80,7 +81,7 @@ def apply_successful_payment(db: Session, reference: str) -> bool:
     if not account:
         return False
     now = datetime.now(timezone.utc)
-    current_expiry = account.paid_until
+    current_expiry = as_utc(account.paid_until) if account.paid_until else None
     account.paid_until = (
         current_expiry + timedelta(days=settings.subscription_days)
         if current_expiry and current_expiry > now
