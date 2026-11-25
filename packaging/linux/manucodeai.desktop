@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=ManuCodeAI
 Comment=AI-powered desktop coding assistant
-Exec=ManuCodeAI
+Exec=AppRun
 Icon=manucodeai
 Terminal=false
 Type=Application
