@@ -36,12 +36,13 @@ def _clerk_email(user_id: str) -> str:
         user = response.json()
     except (httpx.HTTPError, ValueError) as error:
         raise HTTPException(status_code=502, detail="Unable to verify the Clerk account profile.") from error
-    addresses = user.get("email_addresses", [])
     primary_id = user.get("primary_email_address_id")
-    for address in addresses:
-        if address.get("id") == primary_id and address.get("email_address"):
+    for address in user.get("email_addresses", []):
+        verification = address.get("verification") or {}
+        if (address.get("id") == primary_id and address.get("email_address")
+                and verification.get("status") == "verified"):
             return address["email_address"].strip().lower()
-    raise HTTPException(status_code=403, detail="A primary email address is required.")
+    raise HTTPException(status_code=403, detail="A verified primary email address is required.")
 
 def require_identity(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> Identity:
     if not credentials or credentials.scheme.lower() != "bearer":
@@ -57,6 +58,15 @@ def require_identity(credentials: HTTPAuthorizationCredentials | None = Depends(
         user_id = claims.get("sub")
         if not isinstance(user_id, str) or not user_id:
             raise jwt.InvalidTokenError("Missing Clerk subject.")
+        audience = claims.get("aud")
+        if audience:
+            audiences = audience if isinstance(audience, list) else [audience]
+            if not settings.clerk_oauth_client_id or settings.clerk_oauth_client_id not in audiences:
+                raise jwt.InvalidTokenError("Token audience is not this ManuCodeAI OAuth client.")
+        else:
+            party = claims.get("azp")
+            if settings.clerk_authorized_parties and party not in settings.clerk_authorized_parties:
+                raise jwt.InvalidTokenError("Token authorized party is not allowed.")
     except (jwt.PyJWTError, RuntimeError) as error:
         raise HTTPException(status_code=401, detail="Your sign-in session is invalid or expired.") from error
     email = _clerk_email(user_id)
