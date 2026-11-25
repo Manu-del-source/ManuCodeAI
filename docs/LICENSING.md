@@ -22,6 +22,7 @@ The desktop app remains a local PySide6 application. The licensing API is a sepa
 | `POST /api/v1/paystack/webhook` | Validate Paystack signature and verify successful transactions |
 | `GET /api/v1/admin/overview` | Admin totals and revenue |
 | `GET /api/v1/admin/users` | User/trial/subscription list |
+| `GET /api/v1/admin/config` | Paystack configuration status without exposing secrets |
 | `GET /api/v1/admin/payments` | Payment ledger |
 | `PATCH /api/v1/admin/users/{clerk_user_id}` | Suspend or restore an account |
 | `POST /api/v1/admin/users/{clerk_user_id}/grant` | Grant a number of access days |
@@ -48,7 +49,7 @@ Clerk's Device Authorization Grant is intended for native applications and CLI c
 4. Configure the Paystack webhook URL as `https://YOUR-LICENSING-HOST/api/v1/paystack/webhook`.
 5. Use the test secret key and test transactions before switching to live mode.
 
-The desktop client must never receive the Paystack secret key. The webhook handler checks the HMAC signature and independently verifies the transaction's status, reference, amount, and currency before extending access.
+The desktop client must never receive the Paystack secret key. The admin dashboard shows whether the server key and callback are configured, plus the exact webhook URL to register; actual keys are set in Render environment variables and are never displayed in the dashboard. The webhook handler checks the HMAC signature and independently verifies the transaction's status, reference, amount, and currency before extending access.
 
 ## Render deployment
 
