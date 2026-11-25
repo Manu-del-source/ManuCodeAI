@@ -112,6 +112,23 @@ def admin_overview(_: Identity = Depends(require_admin), db: Session = Depends(g
     }
 
 
+@app.get("/api/v1/admin/config")
+def admin_config(_: Identity = Depends(require_admin)) -> dict:
+    key = settings.paystack_secret_key
+    mode = "test" if key.startswith("sk_test_") else "live" if key.startswith("sk_live_") else "unknown"
+    return {
+        "provider": "Paystack",
+        "configured": bool(key),
+        "mode": mode if key else "not_configured",
+        "callback_configured": bool(settings.paystack_callback_url),
+        "webhook_path": "/api/v1/paystack/webhook",
+        "trial_minutes": settings.trial_minutes,
+        "subscription_amount_kes": settings.subscription_amount_subunits / 100,
+        "subscription_days": settings.subscription_days,
+        "currency": settings.currency,
+    }
+
+
 @app.get("/api/v1/admin/users")
 def admin_users(
     _: Identity = Depends(require_admin), db: Session = Depends(get_db), limit: int = 100,
@@ -212,16 +229,17 @@ th,td{text-align:left;padding:12px;border-bottom:1px solid #30343c;font-size:13p
 <p class="muted">User access, trials, subscriptions and payment overview.</p>
 <section class="card"><div id="signin"></div><button id="load" style="display:none">Refresh dashboard</button><p id="message" class="muted"></p></section>
 <section id="dashboard"><div class="stats" id="stats"></div>
-<section class="card"><h2>Users</h2><div class="scroll"><table><thead><tr><th>Email</th><th>Status</th><th>Trial ends</th><th>Paid until</th><th>Actions</th></tr></thead><tbody id="users"></tbody></table></div></section>
+<section class="card"><h2>Payment configuration</h2><div id="payment-config" class="muted">Loading configuration…</div></section>\n<section class="card"><h2>Users</h2><div class="scroll"><table><thead><tr><th>Email</th><th>Status</th><th>Trial ends</th><th>Paid until</th><th>Actions</th></tr></thead><tbody id="users"></tbody></table></div></section>
 <section class="card"><h2>Payments</h2><div class="scroll"><table><thead><tr><th>Email</th><th>Reference</th><th>Amount</th><th>Status</th><th>Created</th><th>Paid</th></tr></thead><tbody id="payments"></tbody></table></div></section>
 </section></main>
 <script>
 const publishableKey=__CLERK_PUBLISHABLE_KEY__;const message=document.getElementById('message');let clerkToken=null;
 async function api(path,options={}){const r=await fetch(path,{...options,headers:{'Content-Type':'application/json','Authorization':'Bearer '+clerkToken,...(options.headers||{})}});const b=await r.json();if(!r.ok)throw new Error(b.detail||'Request failed');return b;}
 function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-async function loadDashboard(){try{const [o,u,p]=await Promise.all([api('/api/v1/admin/overview'),api('/api/v1/admin/users'),api('/api/v1/admin/payments')]);
+async function loadDashboard(){try{const [o,u,p,cfg]=await Promise.all([api('/api/v1/admin/overview'),api('/api/v1/admin/users'),api('/api/v1/admin/payments'),api('/api/v1/admin/config')]);
 document.getElementById('stats').innerHTML=[['Users',o.total_users],['Active trials',o.trial_users],['Paying users',o.paying_users],['Successful payments',o.successful_payments],['Revenue','KSh '+o.revenue_kes.toLocaleString()]].map(([k,v])=>'<div class="card stat"><span class="muted">'+k+'</span><strong>'+v+'</strong></div>').join('');
 document.getElementById('users').innerHTML=u.map(x=>'<tr><td>'+esc(x.email)+'</td><td>'+esc(x.status)+'</td><td>'+new Date(x.trial_ends_at).toLocaleString()+'</td><td>'+(x.paid_until?new Date(x.paid_until).toLocaleString():'—')+'</td><td><button onclick="grant(\''+encodeURIComponent(x.user_id)+'\')">Grant 14 days</button> <button class="secondary" onclick="suspend(\''+encodeURIComponent(x.user_id)+'\','+(!x.suspended)+')">'+(x.suspended?'Restore':'Suspend')+'</button></td></tr>').join('');
+document.getElementById('payment-config').innerHTML='<p>Paystack secret: <strong>'+esc(cfg.configured?'Configured':'Missing')+'</strong> ('+esc(cfg.mode)+')</p><p>Checkout callback: <strong>'+esc(cfg.callback_configured?'Configured':'Missing')+'</strong></p><p>Webhook URL: <code>'+esc(location.origin+cfg.webhook_path)+'</code></p><p>Plan: KSh '+cfg.subscription_amount_kes+' for '+cfg.subscription_days+' days · trial '+cfg.trial_minutes+' minutes.</p><p class=\"muted\">Set or rotate secret keys in Render environment variables. The dashboard never displays or stores secret keys.</p>';
 document.getElementById('payments').innerHTML=p.map(x=>'<tr><td>'+esc(x.email)+'</td><td>'+esc(x.reference)+'</td><td>KSh '+x.amount_kes.toLocaleString()+'</td><td>'+esc(x.status)+'</td><td>'+new Date(x.created_at).toLocaleString()+'</td><td>'+(x.paid_at?new Date(x.paid_at).toLocaleString():'—')+'</td></tr>').join('');
 document.getElementById('dashboard').style.display='block';message.textContent='Dashboard refreshed.';}catch(e){message.textContent=e.message;}}
 async function grant(id){try{await api('/api/v1/admin/users/'+decodeURIComponent(id)+'/grant',{method:'POST',body:JSON.stringify({days:14})});await loadDashboard();}catch(e){message.textContent=e.message;}}
