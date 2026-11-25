@@ -4,7 +4,9 @@ ManuCodeAI is a **standalone Windows and Linux desktop coding agent**. It uses V
 
 ## Features
 
-- Desktop interface built with PySide6.
+- Desktop interface built with PySide6, with sidebar navigation for Overview, Workspace, Activity, and Account.
+- Clerk browser-based device sign-in for desktop accounts.
+- Server-verified 15-minute trial and KSh 250 / 14-day Paystack access.
 - OpenAI-compatible providers: AgentRouter, Gemini, OpenRouter, and compatible custom endpoints.
 - Anthropic-compatible Coarena provider.
 - Provider-specific API keys stored in the operating system credential store through keyring.
@@ -81,6 +83,16 @@ python run_desktop.py
 
 API keys are stored using the OS credential store when available. They are not written to the selected project or the progress manifest. If secure credential storage is unavailable, ManuCodeAI reports that the key cannot be persisted.
 
+## Account, trial, and subscription
+
+The Account page uses Clerk Device Authorization Grant. Sign-in opens the Clerk verification page in your browser and returns a token to the desktop app; tokens are stored in the operating system credential store. ManuCodeAI checks access against the remote licensing API before enabling coding and refreshes entitlement status while the app is running.
+
+The current plan is KSh 250 for 14 days after a 15-minute free trial. Payment is a one-time Paystack checkout; customers renew manually. The Paystack secret key is never included in the desktop application.
+
+For local development, copy `.env.example` to `.env` and configure `MANUCODEAI_LICENSING_API_URL`, `CLERK_FRONTEND_API_URL`, and `CLERK_OAUTH_CLIENT_ID`. The Clerk OAuth application must be public and have Device Authorization Grant enabled, with `openid profile email offline_access` scopes. The backend's Clerk and Paystack secret keys belong only in the licensing service environment.
+
+The licensing API, admin dashboard, deployment configuration, and setup steps are documented in [`docs/LICENSING.md`](docs/LICENSING.md). The admin dashboard is served at `/admin` on the licensing host and is restricted by the server-side `MANUCODEAI_ADMIN_EMAILS` allowlist.
+
 ## Provider notes
 
 | Provider | API protocol | Model discovery |
@@ -106,6 +118,7 @@ Install both dependency sets, then run:
 
 ```bash
 python -m compileall -q desktop
+python -m compileall -q desktop licensing_api tests
 python -m unittest discover -s tests -v
 ```
 
