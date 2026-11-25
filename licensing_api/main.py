@@ -59,6 +59,20 @@ def my_payments(identity: Identity = Depends(require_identity), db: Session = De
     } for row in rows]
 
 
+@app.get("/payment/complete", response_class=HTMLResponse)
+def payment_complete() -> str:
+    return """<!doctype html><html lang="en"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>ManuCodeAI payment</title><style>
+    body{margin:0;background:#0d0f12;color:#eceef2;font:16px Segoe UI,sans-serif;display:grid;
+    min-height:100vh;place-items:center}.card{max-width:520px;margin:24px;padding:32px;background:#15181d;
+    border:1px solid #30343c;border-radius:14px}h1{color:#e1bf7c}p{line-height:1.6;color:#b7bdc7}
+    </style></head><body><main class="card"><h1>Payment submitted</h1>
+    <p>Paystack has returned you to ManuCodeAI. Your payment is being verified securely.
+    Return to the desktop application and select <strong>Refresh access</strong>.
+    Access is activated only after the server confirms the transaction.</p></main></body></html>"""
+
+
 @app.post("/api/v1/paystack/webhook")
 async def paystack_webhook(
     request: Request,
