@@ -47,7 +47,7 @@ def begin_device_authorization() -> DeviceAuthorization:
     frontend, client_id = _clerk_config()
     try:
         metadata_response = httpx.get(
-            f"{frontend}/.well-known/oauth-authorization-server", timeout=10.0
+            f"{frontend}/.well-known/oauth-authorization-server", timeout=5.0
         )
         metadata_response.raise_for_status()
         metadata = metadata_response.json()
@@ -61,7 +61,7 @@ def begin_device_authorization() -> DeviceAuthorization:
             device_endpoint,
             data={"client_id": client_id, "scope": "openid profile email offline_access"},
             headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=10.0,
+            timeout=5.0,
         )
         response.raise_for_status()
         data = response.json()
@@ -103,7 +103,7 @@ def poll_device_authorization(
                     "device_code": device.device_code,
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
-                timeout=10.0,
+                timeout=5.0,
             )
             payload = response.json()
         except (httpx.HTTPError, ValueError) as error:
@@ -159,7 +159,7 @@ def access_token(qsettings) -> str:
     frontend, client_id = _clerk_config()
     try:
         metadata = httpx.get(
-            f"{frontend}/.well-known/oauth-authorization-server", timeout=10.0
+            f"{frontend}/.well-known/oauth-authorization-server", timeout=5.0
         )
         metadata.raise_for_status()
         endpoint = metadata.json()["token_endpoint"]
@@ -167,7 +167,7 @@ def access_token(qsettings) -> str:
             endpoint,
             data={"client_id": client_id, "grant_type": "refresh_token", "refresh_token": refresh},
             headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=10.0,
+            timeout=5.0,
         )
         response.raise_for_status()
         payload = response.json()
@@ -194,7 +194,7 @@ def fetch_entitlement(token: str) -> dict:
         response = httpx.get(
             f"{base}/api/v1/me",
             headers={"Authorization": f"Bearer {token}"},
-            timeout=12.0,
+            timeout=8.0,
         )
         response.raise_for_status()
         return response.json()
@@ -214,7 +214,7 @@ def create_checkout(token: str) -> str:
         response = httpx.post(
             f"{base}/api/v1/billing/checkout",
             headers={"Authorization": f"Bearer {token}"},
-            timeout=15.0,
+            timeout=10.0,
         )
         response.raise_for_status()
         payload = response.json()
