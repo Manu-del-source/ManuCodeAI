@@ -453,6 +453,7 @@ class MainWindow(QMainWindow):
         self.checkout_button = QPushButton("Purchase access — KSh 250")
         self.checkout_button.setObjectName("primaryButton")
         self.checkout_button.clicked.connect(self.start_checkout)
+        self.checkout_button.setEnabled(False)
         plan_layout.addWidget(self.checkout_button)
         layout.addWidget(plan_card)
         layout.addStretch(1)
@@ -777,6 +778,9 @@ class MainWindow(QMainWindow):
             self.auth_worker.wait(1000)
         if self.entitlement_timer:
             self.entitlement_timer.stop()
+        for background_worker in (self.entitlement_worker, self.checkout_worker):
+            if background_worker and background_worker.isRunning():
+                background_worker.wait(1200)
         event.accept()
 
 
