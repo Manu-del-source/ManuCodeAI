@@ -117,9 +117,16 @@ def require_identity(
     except jwt.PyJWTError:
         unverified = {}
 
-    # Clerk browser session tokens contain sid. Native OAuth access tokens are
-    # verified through Clerk's dedicated endpoint, including opaque-token mode.
-    user_id = _verify_session_token(token) if unverified.get("sid") else _verify_oauth_access_token(token)
+    # Browser session JWTs carry sid. OAuth access tokens can be JWT or opaque;
+    # route JWTs with OAuth claims and all opaque tokens through Clerk's BAPI.
+    is_oauth_token = bool(
+        unverified.get("aud") or unverified.get("client_id") or "scope" in unverified
+    )
+    user_id = (
+        _verify_session_token(token)
+        if unverified.get("sid") and not is_oauth_token
+        else _verify_oauth_access_token(token)
+    )
     email = _clerk_email(user_id)
     return Identity(user_id=user_id, email=email, is_admin=email in settings.admin_emails)
 
