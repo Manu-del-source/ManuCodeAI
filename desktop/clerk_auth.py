@@ -141,7 +141,7 @@ def clear_tokens(qsettings) -> None:
     for key in (ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY):
         try:
             keyring.delete_password(TOKEN_SERVICE, key)
-        except keyring.errors.PasswordDeleteError:
+        except Exception:
             pass
     qsettings.remove("clerk/access_token_expires_at")
 
@@ -219,7 +219,10 @@ def create_checkout(token: str) -> str:
         response.raise_for_status()
         payload = response.json()
     except httpx.HTTPStatusError as error:
-        detail = error.response.json().get("detail", "Could not start Paystack checkout.")
+        try:
+            detail = error.response.json().get("detail", "Could not start Paystack checkout.")
+        except ValueError:
+            detail = "Could not start Paystack checkout."
         raise RuntimeError(detail) from error
     except (httpx.HTTPError, ValueError) as error:
         raise RuntimeError("Could not reach Paystack checkout.") from error
