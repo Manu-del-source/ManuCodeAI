@@ -5,7 +5,8 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QThread, Qt, Signal
+from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
@@ -15,6 +16,10 @@ from PySide6.QtWidgets import (
 from .agent import CodingAgent, discover_models
 from .vscode import VSCodeController
 from .typing_engine import KeyboardKillSwitch
+from .clerk_auth import (
+    access_token, begin_device_authorization, clear_tokens, create_checkout,
+    fetch_entitlement, poll_device_authorization, store_tokens,
+)
 
 
 APP_ORG = "ManuCodeAI"
@@ -89,6 +94,59 @@ class AgentWorker(QThread):
             kill_switch.stop()
 
 
+
+class DeviceLoginWorker(QThread):
+    verification = Signal(str, str)
+    authenticated = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.cancel_event = threading.Event()
+
+    def run(self) -> None:
+        try:
+            device = begin_device_authorization()
+            self.verification.emit(device.user_code, device.verification_uri)
+            tokens = poll_device_authorization(device, self.cancel_event)
+            settings = QSettings(APP_ORG, APP_NAME)
+            store_tokens(
+                tokens["access_token"], tokens["refresh_token"],
+                tokens.get("expires_in", 86400), settings,
+            )
+            token = access_token(settings)
+            self.authenticated.emit(fetch_entitlement(token))
+        except Exception as error:
+            self.failed.emit(str(error))
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+
+
+class EntitlementWorker(QThread):
+    authenticated = Signal(object)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            settings = QSettings(APP_ORG, APP_NAME)
+            self.authenticated.emit(fetch_entitlement(access_token(settings)))
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
+class CheckoutWorker(QThread):
+    checkout_ready = Signal(str)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            settings = QSettings(APP_ORG, APP_NAME)
+            self.checkout_ready.emit(create_checkout(access_token(settings)))
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
 class MainWindow(QMainWindow):
     """Main desktop shell. Existing coding workflow remains on the Workspace page."""
 
@@ -98,7 +156,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = QSettings(APP_ORG, APP_NAME)
         self.worker: AgentWorker | None = None
+        self.auth_worker: DeviceLoginWorker | None = None
+        self.entitlement_worker: EntitlementWorker | None = None
+        self.checkout_worker: CheckoutWorker | None = None
         self.workspace: Path | None = None
+        self.has_access = False
 
         self.setWindowTitle("ManuCodeAI")
         self.resize(1180, 790)
@@ -110,6 +172,11 @@ class MainWindow(QMainWindow):
         self._load_saved_key()
         self._apply_theme()
         self._refresh_workspace_label()
+        self.entitlement_timer = QTimer(self)
+        self.entitlement_timer.setInterval(30000)
+        self.entitlement_timer.timeout.connect(self.refresh_entitlement)
+        self.entitlement_timer.start()
+        QTimer.singleShot(700, self.refresh_entitlement)
 
     def _build_provider_controls(self) -> None:
         self.provider = QComboBox()
@@ -354,9 +421,23 @@ class MainWindow(QMainWindow):
 
         auth_card, auth_layout = self._card("MANUCODEAI ACCOUNT")
         auth_layout.addWidget(self._label(
-            "Authentication is being connected to Clerk. Account status will be verified online.",
+            "Sign in securely through Clerk. ManuCodeAI opens your browser and displays a one-time code.",
             "bodyText",
         ))
+        self.account_email = self._label("Not signed in", "mutedText")
+        auth_layout.addWidget(self.account_email)
+        auth_actions = QHBoxLayout()
+        self.signin_button = QPushButton("Sign in / Create account")
+        self.signin_button.setObjectName("primaryButton")
+        self.signin_button.clicked.connect(self.start_sign_in)
+        self.refresh_access_button = QPushButton("Refresh access")
+        self.refresh_access_button.clicked.connect(self.refresh_entitlement)
+        self.signout_button = QPushButton("Sign out")
+        self.signout_button.clicked.connect(self.sign_out)
+        auth_actions.addWidget(self.signin_button)
+        auth_actions.addWidget(self.refresh_access_button)
+        auth_actions.addWidget(self.signout_button)
+        auth_layout.addLayout(auth_actions)
         layout.addWidget(auth_card)
 
         plan_card, plan_layout = self._card("SUBSCRIPTION")
@@ -367,11 +448,130 @@ class MainWindow(QMainWindow):
             "Payments will be processed securely through Paystack.",
             "mutedText",
         ))
-        self.account_status = self._label("Billing is not connected yet.", "warningText")
+        self.account_status = self._label("Sign in to start your 15-minute trial.", "warningText")
         plan_layout.addWidget(self.account_status)
+        self.checkout_button = QPushButton("Purchase access — KSh 250")
+        self.checkout_button.setObjectName("primaryButton")
+        self.checkout_button.clicked.connect(self.start_checkout)
+        plan_layout.addWidget(self.checkout_button)
         layout.addWidget(plan_card)
         layout.addStretch(1)
         return page
+
+    def start_sign_in(self) -> None:
+        if self.auth_worker and self.auth_worker.isRunning():
+            return
+        self.signin_button.setEnabled(False)
+        self.account_status.setText("Starting secure Clerk sign-in...")
+        self.auth_worker = DeviceLoginWorker()
+        self.auth_worker.verification.connect(self._show_device_verification)
+        self.auth_worker.authenticated.connect(self._apply_entitlement)
+        self.auth_worker.failed.connect(self._on_auth_failed)
+        self.auth_worker.start()
+
+    def _show_device_verification(self, user_code: str, verification_uri: str) -> None:
+        QDesktopServices.openUrl(QUrl(verification_uri))
+        QMessageBox.information(
+            self, "Complete sign-in in your browser",
+            f"Your one-time sign-in code is:\\n\\n{user_code}\\n\\n"
+            "Approve ManuCodeAI in the browser. Keep this application open.",
+        )
+
+    def _on_auth_failed(self, message: str) -> None:
+        self.signin_button.setEnabled(True)
+        self.account_status.setText(message)
+        QMessageBox.warning(self, "Sign-in failed", message)
+
+    def refresh_entitlement(self) -> None:
+        if self.entitlement_worker and self.entitlement_worker.isRunning():
+            return
+        try:
+            import keyring
+            existing = keyring.get_password("ManuCodeAI", "clerk-refresh-token")
+        except Exception:
+            existing = None
+        if not existing:
+            self.has_access = False
+            self.start_button.setEnabled(False)
+            if hasattr(self, "account_status"):
+                self.account_status.setText("Sign in to start your 15-minute free trial.")
+            return
+        self.refresh_access_button.setEnabled(False)
+        self.entitlement_worker = EntitlementWorker()
+        self.entitlement_worker.authenticated.connect(self._apply_entitlement)
+        self.entitlement_worker.failed.connect(self._on_entitlement_failed)
+        self.entitlement_worker.finished.connect(
+            lambda: self.refresh_access_button.setEnabled(True)
+        )
+        self.entitlement_worker.start()
+
+    def _on_entitlement_failed(self, message: str) -> None:
+        self.has_access = False
+        self.start_button.setEnabled(False)
+        self.account_status.setText(message)
+        self.signin_button.setEnabled(True)
+
+    def _apply_entitlement(self, entitlement: dict) -> None:
+        self.has_access = bool(entitlement.get("has_access"))
+        status = entitlement.get("status", "unknown")
+        email = entitlement.get("email", "")
+        self.account_email.setText(email or "Signed in")
+        remaining = entitlement.get("seconds_remaining")
+        if status == "trial":
+            minutes = max(0, int(remaining or 0) // 60)
+            seconds = max(0, int(remaining or 0) % 60)
+            self.account_status.setText(f"Free trial active — {minutes}m {seconds}s remaining.")
+        elif status == "subscribed":
+            self.account_status.setText(f"Subscription active until {entitlement.get('paid_until')}.")
+        elif status == "administrator":
+            self.account_status.setText("Administrator access active.")
+        elif status == "suspended":
+            self.account_status.setText("This account has been suspended. Contact support.")
+        else:
+            self.account_status.setText("Your free trial has ended. Purchase access to continue.")
+        self.start_button.setEnabled(self.has_access)
+        self.checkout_button.setEnabled(status not in ("suspended", "administrator"))
+        self.signin_button.setText("Signed in")
+        self.signin_button.setEnabled(True)
+        if not self.has_access and self.worker and self.worker.isRunning():
+            self.stop_coding()
+
+    def start_checkout(self) -> None:
+        if self.checkout_worker and self.checkout_worker.isRunning():
+            return
+        self.checkout_button.setEnabled(False)
+        self.account_status.setText("Creating secure Paystack checkout...")
+        self.checkout_worker = CheckoutWorker()
+        self.checkout_worker.checkout_ready.connect(self._on_checkout_ready)
+        self.checkout_worker.failed.connect(self._on_checkout_failed)
+        self.checkout_worker.finished.connect(
+            lambda: self.checkout_button.setEnabled(True)
+        )
+        self.checkout_worker.start()
+
+    def _on_checkout_ready(self, checkout_url: str) -> None:
+        QDesktopServices.openUrl(QUrl(checkout_url))
+        self.account_status.setText(
+            "Paystack checkout opened in your browser. Complete payment, then select Refresh access."
+        )
+
+    def _on_checkout_failed(self, message: str) -> None:
+        self.account_status.setText(message)
+        QMessageBox.warning(self, "Payment checkout", message)
+
+    def sign_out(self) -> None:
+        try:
+            clear_tokens(self.settings)
+        except Exception as error:
+            QMessageBox.warning(self, "Sign out", f"Could not clear saved credentials: {error}")
+            return
+        self.has_access = False
+        self.start_button.setEnabled(False)
+        self.account_email.setText("Not signed in")
+        self.account_status.setText("Signed out. Sign in to start a new session.")
+        self.signin_button.setText("Sign in / Create account")
+        self.signin_button.setEnabled(True)
+        self.checkout_button.setEnabled(False)
 
     def _navigate(self, index: int) -> None:
         if 0 <= index < self.pages.count():
@@ -510,6 +710,13 @@ class MainWindow(QMainWindow):
     def start_coding(self) -> None:
         if self.worker and self.worker.isRunning():
             return
+        if not self.has_access:
+            self.navigation.setCurrentRow(3)
+            QMessageBox.information(
+                self, "Access required",
+                "Sign in and start your free trial, or purchase a subscription before coding.",
+            )
+            return
         api_key = self.api_key.text().strip()
         model = self.model.currentText().strip()
         instruction = self.prompt.toPlainText().strip()
@@ -553,7 +760,7 @@ class MainWindow(QMainWindow):
         self._set_idle()
 
     def _set_idle(self) -> None:
-        self.start_button.setEnabled(True)
+        self.start_button.setEnabled(self.has_access)
         self.stop_button.setEnabled(False)
 
     def stop_coding(self) -> None:
@@ -565,6 +772,11 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self.worker.cancel_event.set()
             self.worker.wait(1500)
+        if self.auth_worker and self.auth_worker.isRunning():
+            self.auth_worker.cancel()
+            self.auth_worker.wait(1000)
+        if self.entitlement_timer:
+            self.entitlement_timer.stop()
         event.accept()
 
 
