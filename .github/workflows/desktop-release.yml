@@ -8,6 +8,8 @@ on:
         required: false
         type: string
   push:
+    branches:
+      - feature/manucodeai-ui-auth-billing
     tags:
       - "v*"
 
