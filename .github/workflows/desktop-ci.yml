@@ -6,11 +6,11 @@ on:
       - main
       - feature/standalone-desktop-agent
       - feature/manucodeai-ui-auth-billing
-      - feature/manucodeai-ui-auth-billing
   pull_request:
     branches:
       - main
       - feature/standalone-desktop-agent
+      - feature/manucodeai-ui-auth-billing
   workflow_dispatch:
 
 jobs:
