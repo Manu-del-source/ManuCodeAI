@@ -38,7 +38,7 @@ The desktop app remains a local PySide6 application. The licensing API is a sepa
 6. Set `MANUCODEAI_ADMIN_EMAILS=kiptooe142@gmail.com`.
 7. Set `CLERK_AUTHORIZED_PARTIES` to the exact browser origins used by the admin dashboard. The desktop OAuth token is checked against the configured OAuth client ID.
 
-Clerk's Device Authorization Grant is intended for native applications and CLI clients: the desktop displays a short user code, opens the verification page in a browser, and polls for tokens. Never embed a Clerk client secret in the desktop app.
+Clerk's Device Authorization Grant is intended for native applications and CLI clients: the desktop displays a short user code, opens the verification page in a browser, and polls for tokens. The licensing API verifies native OAuth access tokens through Clerk's dedicated access-token verification endpoint (supporting JWT and opaque token formats); browser admin session tokens are verified against Clerk JWKS and the configured authorized-party allowlist. Never embed a Clerk client secret in the desktop app.
 
 ## Paystack setup
 
