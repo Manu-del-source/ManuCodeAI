@@ -8,6 +8,9 @@ from sqlalchemy.orm import sessionmaker
 from licensing_api.database import Base
 from licensing_api.entitlements import entitlement_payload, get_or_create_account
 from licensing_api.models import Account
+from fastapi.security import HTTPAuthorizationCredentials
+from unittest.mock import patch
+from licensing_api.auth import require_identity
 
 
 class EntitlementTests(unittest.TestCase):
@@ -63,6 +66,15 @@ class EntitlementTests(unittest.TestCase):
         payload = entitlement_payload(account)
         self.assertEqual(payload["status"], "subscribed")
         self.assertTrue(payload["has_access"])
+
+    def test_opaque_clerk_oauth_token_is_verified_by_clerk_access_token_api(self):
+        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="opaque-oauth-token")
+        with patch("licensing_api.auth._verify_oauth_access_token", return_value="user_oauth_123") as verify:
+            with patch("licensing_api.auth._clerk_email", return_value="oauth@example.com"):
+                identity = require_identity(credentials)
+        verify.assert_called_once_with("opaque-oauth-token")
+        self.assertEqual(identity.user_id, "user_oauth_123")
+        self.assertEqual(identity.email, "oauth@example.com")
 
     def test_suspension_overrides_admin_and_paid_access(self):
         now = datetime.now(timezone.utc)
