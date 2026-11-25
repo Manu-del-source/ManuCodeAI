@@ -27,7 +27,7 @@ def create_tables() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 def root() -> str:
-    return """<!doctype html><nhtml lang="en"><head><meta charset="utf-8">
+    return """<!doctype html><html lang="en"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>ManuCodeAI Licensing API</title><style>
     *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;
