@@ -10,7 +10,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QPlainTextEdit, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from .agent import CodingAgent, discover_models
@@ -183,20 +183,27 @@ class MainWindow(QMainWindow):
         self.provider.addItems(PROVIDERS.keys())
         saved_provider = self.settings.value("provider", "AgentRouter")
         self.provider.setCurrentText(saved_provider if saved_provider in PROVIDERS else "AgentRouter")
+        self.provider.setMinimumHeight(42)
         self._active_provider = self.provider.currentText()
         config = PROVIDERS[self._active_provider]
 
         self.base_url = QLineEdit(
             self.settings.value(f"{self._active_provider}/base_url", config["base_url"])
         )
+        self.base_url.setMinimumHeight(42)
+        self.base_url.setMinimumWidth(260)
         self.model = QComboBox()
         self.model.setEditable(True)
+        self.model.setMinimumHeight(42)
+        self.model.setMinimumWidth(220)
         self.model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.model.setCurrentText(
             self.settings.value(f"{self._active_provider}/model", config.get("default_model", ""))
         )
         self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key.setMinimumHeight(42)
+        self.api_key.setMinimumWidth(260)
         self.api_key.setPlaceholderText("Enter your provider API key")
 
         self.fetch_models_button = QPushButton("Fetch models")
@@ -365,7 +372,8 @@ class MainWindow(QMainWindow):
         provider_card, provider_layout = self._card("AI PROVIDER CONFIGURATION")
         form = QFormLayout()
         form.setHorizontalSpacing(18)
-        form.setVerticalSpacing(13)
+        form.setVerticalSpacing(16)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.addRow("Provider", self.provider)
         form.addRow("API base URL", self.base_url)
         model_row = QHBoxLayout()
@@ -392,7 +400,18 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self.start_button)
         task_layout.addLayout(action_row)
         layout.addWidget(task_card, 1)
-        return page
+
+        # The workspace contains several controls and a sizeable task editor.
+        # Keep every field reachable on short laptop displays instead of
+        # allowing the parent layout to compress or clip the provider form.
+        scroll = QScrollArea()
+        scroll.setObjectName("workspaceScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(page)
+        return scroll
 
     def _activity_page(self) -> QWidget:
         page = QWidget()
@@ -610,8 +629,17 @@ class MainWindow(QMainWindow):
             QListWidget#navigation::item { color: #9CA2AD; padding: 13px 12px; border-radius: 7px; margin: 2px 0; }
             QListWidget#navigation::item:selected { color: #F1D49A; background: #292216; border-left: 3px solid #C49A52; }
             QLineEdit, QComboBox, QPlainTextEdit {
-                background: #0F1216; color: #F0F1F3; border: 1px solid #343943;
+                background: #0F1216; color: #F0F1F3; border: 1px solid #505762;
                 border-radius: 7px; padding: 9px; selection-background-color: #765A2E;
+            }
+            QLineEdit, QComboBox { min-height: 22px; }
+            QComboBox { padding-right: 28px; }
+            QComboBox::drop-down {
+                subcontrol-origin: padding; subcontrol-position: top right;
+                width: 25px; border-left: 1px solid #505762;
+            }
+            QComboBox QLineEdit {
+                background: transparent; color: #F0F1F3; border: 0; padding: 0 5px;
             }
             QPlainTextEdit { padding: 12px; }
             QPushButton { background: #292D34; color: #E8E9EC; border: 1px solid #3B404A;
