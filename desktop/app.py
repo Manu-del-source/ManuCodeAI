@@ -780,12 +780,12 @@ class MainWindow(QMainWindow):
             self.worker.wait(1500)
         if self.auth_worker and self.auth_worker.isRunning():
             self.auth_worker.cancel()
-            self.auth_worker.wait(1000)
+            self.auth_worker.wait(10000)
         if self.entitlement_timer:
             self.entitlement_timer.stop()
         for background_worker in (self.entitlement_worker, self.checkout_worker):
             if background_worker and background_worker.isRunning():
-                background_worker.wait(1200)
+                background_worker.wait(11000)
         event.accept()
 
 
