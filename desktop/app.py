@@ -495,6 +495,8 @@ class MainWindow(QMainWindow):
         if not existing:
             self.has_access = False
             self.start_button.setEnabled(False)
+            if hasattr(self, "checkout_button"):
+                self.checkout_button.setEnabled(False)
             if hasattr(self, "account_status"):
                 self.account_status.setText("Sign in to start your 15-minute free trial.")
             return
@@ -511,7 +513,9 @@ class MainWindow(QMainWindow):
         self.has_access = False
         self.start_button.setEnabled(False)
         self.account_status.setText(message)
+        self.signin_button.setText("Sign in / Create account")
         self.signin_button.setEnabled(True)
+        self.checkout_button.setEnabled(False)
 
     def _apply_entitlement(self, entitlement: dict) -> None:
         self.has_access = bool(entitlement.get("has_access"))
