@@ -2,6 +2,9 @@
 from __future__ import annotations
 import os
 from dataclasses import dataclass
+from dotenv import load_dotenv
+
+load_dotenv()
 
 def _csv_env(name: str) -> tuple[str, ...]:
     return tuple(v.strip() for v in os.getenv(name, "").split(",") if v.strip())
