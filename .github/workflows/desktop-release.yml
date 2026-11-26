@@ -53,8 +53,8 @@ jobs:
 
           target = Path("desktop/build_config.py")
           target.write_text(
-              '"""Public configuration injected by the desktop release workflow."""\\n'
-              + "".join(f"{name} = {os.environ[name]!r}\\n" for name in names),
+              '"""Public configuration injected by the desktop release workflow."""\n'
+              + "".join(f"{name} = {os.environ[name]!r}\n" for name in names),
               encoding="utf-8",
           )
           print("Public desktop configuration generated.")
@@ -88,6 +88,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
       - name: Configure public desktop settings
         shell: bash
         env:
@@ -113,17 +118,12 @@ jobs:
 
           target = Path("desktop/build_config.py")
           target.write_text(
-              '"""Public configuration injected by the desktop release workflow."""\\n'
-              + "".join(f"{name} = {os.environ[name]!r}\\n" for name in names),
+              '"""Public configuration injected by the desktop release workflow."""\n'
+              + "".join(f"{name} = {os.environ[name]!r}\n" for name in names),
               encoding="utf-8",
           )
           print("Public desktop configuration generated.")
           PY
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
       - name: Install system dependencies
         run: |
           sudo apt-get update
