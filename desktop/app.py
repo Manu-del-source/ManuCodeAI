@@ -20,6 +20,14 @@ from .clerk_auth import (
     access_token, begin_device_authorization, clear_tokens, create_checkout,
     fetch_entitlement, poll_device_authorization, store_tokens,
 )
+from .updater import (
+    ReleaseCheckWorker, InstallerDownloadWorker, launch_windows_installer,
+)
+
+try:
+    from .build_config import APP_VERSION
+except ImportError:
+    APP_VERSION = "0.0.0-dev"
 
 
 APP_ORG = "ManuCodeAI"
@@ -182,6 +190,9 @@ class MainWindow(QMainWindow):
         self.entitlement_timer.timeout.connect(self.refresh_entitlement)
         self.entitlement_timer.start()
         QTimer.singleShot(700, self.refresh_entitlement)
+        self.release_check_worker = None
+        self.update_download_worker = None
+        QTimer.singleShot(2500, self.check_for_updates)
 
     def _build_provider_controls(self) -> None:
         self.provider = QComboBox()
@@ -483,6 +494,61 @@ class MainWindow(QMainWindow):
         layout.addWidget(plan_card)
         layout.addStretch(1)
         return page
+
+    def check_for_updates(self) -> None:
+        if sys.platform != "win32":
+            return
+        if self.release_check_worker and self.release_check_worker.isRunning():
+            return
+        self.release_check_worker = ReleaseCheckWorker(APP_VERSION)
+        self.release_check_worker.available.connect(self._on_update_available)
+        self.release_check_worker.failed.connect(
+            lambda message: self._log(f"Update check unavailable: {message}")
+        )
+        self.release_check_worker.start()
+
+    def _on_update_available(self, release: dict) -> None:
+        notes = release.get("notes") or "A newer version of ManuCodeAI is available."
+        if len(notes) > 1200:
+            notes = notes[:1200].rstrip() + "…"
+        answer = QMessageBox.question(
+            self,
+            "ManuCodeAI update available",
+            f"Version {release['version']} is available (installed: {APP_VERSION}).\n\n"
+            f"{notes}\n\nDownload and install this update now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._log(f"Downloading ManuCodeAI {release['version']} update...")
+        self.update_download_worker = InstallerDownloadWorker(release)
+        self.update_download_worker.completed.connect(self._on_update_downloaded)
+        self.update_download_worker.failed.connect(self._on_update_failed)
+        self.update_download_worker.start()
+
+    def _on_update_downloaded(self, installer_path: str) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Ready to install",
+            "The update has downloaded and passed SHA-256 verification. "
+            "ManuCodeAI will close, install the update, and reopen.",
+            QMessageBox.StandardButton.Install | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Install,
+        )
+        if answer != QMessageBox.StandardButton.Install:
+            self._log("Update downloaded; installation was cancelled.")
+            return
+        try:
+            launch_windows_installer(installer_path)
+            self._save_settings()
+            self.close()
+        except Exception as error:
+            QMessageBox.critical(self, "Update could not start", str(error))
+
+    def _on_update_failed(self, message: str) -> None:
+        self._log(f"Update failed: {message}")
+        QMessageBox.warning(self, "ManuCodeAI update", message)
 
     def start_sign_in(self) -> None:
         if self.auth_worker and self.auth_worker.isRunning():
