@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import sys
 import tempfile
@@ -100,15 +99,30 @@ class InstallerDownloadWorker(QThread):
             if not expected or not re.fullmatch(r"[0-9a-f]{64}", expected):
                 raise RuntimeError("The release does not contain a valid installer SHA-256 checksum.")
 
-            installer_data = _request(self.release["installer_url"], timeout=180)
-            actual = hashlib.sha256(installer_data).hexdigest()
-            if actual != expected:
-                raise RuntimeError("The downloaded installer failed SHA-256 verification.")
-
             target_dir = Path(tempfile.gettempdir()) / "ManuCodeAI-Updates"
             target_dir.mkdir(parents=True, exist_ok=True)
             target = target_dir / f"ManuCodeAI-Setup-{self.release['version']}.exe"
-            target.write_bytes(installer_data)
+            temporary = target.with_suffix(".exe.part")
+            digest = hashlib.sha256()
+            request = urllib.request.Request(
+                self.release["installer_url"],
+                headers={"User-Agent": USER_AGENT},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=180) as response:
+                    with temporary.open("wb") as output:
+                        while True:
+                            chunk = response.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            digest.update(chunk)
+                            output.write(chunk)
+                if digest.hexdigest() != expected:
+                    raise RuntimeError("The downloaded installer failed SHA-256 verification.")
+                temporary.replace(target)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
             self.completed.emit(str(target))
         except (OSError, urllib.error.URLError, UnicodeError, RuntimeError) as error:
             self.failed.emit(str(error))
