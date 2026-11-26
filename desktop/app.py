@@ -533,10 +533,10 @@ class MainWindow(QMainWindow):
             "Ready to install",
             "The update has downloaded and passed SHA-256 verification. "
             "ManuCodeAI will close, install the update, and reopen.",
-            QMessageBox.StandardButton.Install | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Install,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
-        if answer != QMessageBox.StandardButton.Install:
+        if answer != QMessageBox.StandardButton.Yes:
             self._log("Update downloaded; installation was cancelled.")
             return
         try:
