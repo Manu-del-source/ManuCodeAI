@@ -101,7 +101,7 @@ jobs:
           CLERK_FRONTEND_API_URL: ${{ vars.CLERK_FRONTEND_API_URL }}
           CLERK_OAUTH_CLIENT_ID: ${{ vars.CLERK_OAUTH_CLIENT_ID }}
           MANUCODEAI_LICENSING_API_URL: ${{ vars.MANUCODEAI_LICENSING_API_URL }}
-          APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.0-dev' }}
+          APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || (inputs.release_tag != '' && inputs.release_tag || '0.0.0-dev') }}
         run: |
           python - <<'PY'
           import os
