@@ -34,6 +34,7 @@ jobs:
           CLERK_FRONTEND_API_URL: ${{ vars.CLERK_FRONTEND_API_URL }}
           CLERK_OAUTH_CLIENT_ID: ${{ vars.CLERK_OAUTH_CLIENT_ID }}
           MANUCODEAI_LICENSING_API_URL: ${{ vars.MANUCODEAI_LICENSING_API_URL }}
+          APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.0-dev' }}
         run: |
           python - <<'PY'
           import os
@@ -43,6 +44,7 @@ jobs:
               "CLERK_FRONTEND_API_URL",
               "CLERK_OAUTH_CLIENT_ID",
               "MANUCODEAI_LICENSING_API_URL",
+              "APP_VERSION",
           )
           missing = [name for name in names if not os.environ.get(name, "").strip()]
           if missing:
@@ -99,6 +101,7 @@ jobs:
           CLERK_FRONTEND_API_URL: ${{ vars.CLERK_FRONTEND_API_URL }}
           CLERK_OAUTH_CLIENT_ID: ${{ vars.CLERK_OAUTH_CLIENT_ID }}
           MANUCODEAI_LICENSING_API_URL: ${{ vars.MANUCODEAI_LICENSING_API_URL }}
+          APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.0-dev' }}
         run: |
           python - <<'PY'
           import os
@@ -108,6 +111,7 @@ jobs:
               "CLERK_FRONTEND_API_URL",
               "CLERK_OAUTH_CLIENT_ID",
               "MANUCODEAI_LICENSING_API_URL",
+              "APP_VERSION",
           )
           missing = [name for name in names if not os.environ.get(name, "").strip()]
           if missing:
@@ -179,6 +183,10 @@ jobs:
         with:
           name: ManuCodeAI-Linux
           path: release-assets
+      - name: Generate release checksums
+        run: |
+          cd release-assets
+          sha256sum ManuCodeAI-Setup.exe ManuCodeAI-x86_64.AppImage ManuCodeAI-linux-x86_64.tar.gz > SHA256SUMS.txt
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
