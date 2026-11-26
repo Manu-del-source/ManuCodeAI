@@ -45,6 +45,11 @@ PROVIDERS = {
         "protocol": "openai",
         "default_model": "openrouter/free",
     },
+    "NVIDIA": {
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "protocol": "openai",
+        "default_model": "",
+    },
 }
 
 
