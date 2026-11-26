@@ -28,13 +28,31 @@ class DeviceAuthorization:
     token_endpoint: str
 
 
+try:
+    from .build_config import (
+        CLERK_FRONTEND_API_URL as _BUILT_CLERK_FRONTEND_API_URL,
+        CLERK_OAUTH_CLIENT_ID as _BUILT_CLERK_OAUTH_CLIENT_ID,
+        MANUCODEAI_LICENSING_API_URL as _BUILT_LICENSING_API_URL,
+    )
+except ImportError:
+    _BUILT_CLERK_FRONTEND_API_URL = ""
+    _BUILT_CLERK_OAUTH_CLIENT_ID = ""
+    _BUILT_LICENSING_API_URL = ""
+
+
 def licensing_api_url() -> str:
-    return os.getenv("MANUCODEAI_LICENSING_API_URL", "").rstrip("/")
+    return (
+        os.getenv("MANUCODEAI_LICENSING_API_URL") or _BUILT_LICENSING_API_URL
+    ).rstrip("/")
 
 
 def _clerk_config() -> tuple[str, str]:
-    frontend = os.getenv("CLERK_FRONTEND_API_URL", "").rstrip("/")
-    client_id = os.getenv("CLERK_OAUTH_CLIENT_ID", "").strip()
+    frontend = (
+        os.getenv("CLERK_FRONTEND_API_URL") or _BUILT_CLERK_FRONTEND_API_URL
+    ).rstrip("/")
+    client_id = (
+        os.getenv("CLERK_OAUTH_CLIENT_ID") or _BUILT_CLERK_OAUTH_CLIENT_ID
+    ).strip()
     if not frontend or not client_id:
         raise RuntimeError(
             "Clerk is not configured in this build. Set CLERK_FRONTEND_API_URL "
