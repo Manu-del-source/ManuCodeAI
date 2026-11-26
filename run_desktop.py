@@ -1,4 +1,8 @@
 """Launch the standalone ManuCodeAI desktop application."""
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from desktop.app import main
 
 

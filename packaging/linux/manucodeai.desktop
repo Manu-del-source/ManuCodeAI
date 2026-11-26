@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=ManuCodeAI
+Comment=AI-powered desktop coding assistant
+Exec=AppRun
+Icon=manucodeai
+Terminal=false
+Type=Application
+Categories=Development;IDE;
+StartupNotify=true

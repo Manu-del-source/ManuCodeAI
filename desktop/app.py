@@ -5,16 +5,21 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QThread, Signal
+from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
-    QVBoxLayout, QWidget,
+    QApplication, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QPlainTextEdit, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from .agent import CodingAgent, discover_models
 from .vscode import VSCodeController
 from .typing_engine import KeyboardKillSwitch
+from .clerk_auth import (
+    access_token, begin_device_authorization, clear_tokens, create_checkout,
+    fetch_entitlement, poll_device_authorization, store_tokens,
+)
 
 
 APP_ORG = "ManuCodeAI"
@@ -40,12 +45,16 @@ PROVIDERS = {
         "protocol": "openai",
         "default_model": "openrouter/free",
     },
+    "NVIDIA": {
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "protocol": "openai",
+        "default_model": "",
+    },
 }
 
 
 class AgentWorker(QThread):
     status = Signal(str)
-    log = Signal(str)
     completed = Signal(str)
     failed = Signal(str)
 
@@ -64,11 +73,11 @@ class AgentWorker(QThread):
         kill_switch = KeyboardKillSwitch(self.cancel_event, self.status.emit)
         try:
             if kill_switch.start():
-                self.status.emit("Keyboard emergency stop active: press Ctrl+Shift+X at any time.")
+                self.status.emit("Emergency stop active: press Ctrl+Shift+X at any time.")
             else:
                 self.status.emit(
                     f"Keyboard emergency stop unavailable: {kill_switch.error}. "
-                    "The Stop button is still available."
+                    "The Stop button remains available."
                 )
             self.status.emit("Opening project in Visual Studio Code...")
             vscode = VSCodeController()
@@ -90,105 +99,562 @@ class AgentWorker(QThread):
             kill_switch.stop()
 
 
+
+class DeviceLoginWorker(QThread):
+    verification = Signal(str, str)
+    authenticated = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.cancel_event = threading.Event()
+
+    def run(self) -> None:
+        try:
+            device = begin_device_authorization()
+            self.verification.emit(device.user_code, device.verification_uri)
+            tokens = poll_device_authorization(device, self.cancel_event)
+            settings = QSettings(APP_ORG, APP_NAME)
+            store_tokens(
+                tokens["access_token"], tokens["refresh_token"],
+                tokens.get("expires_in", 86400), settings,
+            )
+            token = access_token(settings)
+            self.authenticated.emit(fetch_entitlement(token))
+        except Exception as error:
+            self.failed.emit(str(error))
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+
+
+class EntitlementWorker(QThread):
+    authenticated = Signal(object)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            settings = QSettings(APP_ORG, APP_NAME)
+            self.authenticated.emit(fetch_entitlement(access_token(settings)))
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
+class CheckoutWorker(QThread):
+    checkout_ready = Signal(str)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            settings = QSettings(APP_ORG, APP_NAME)
+            self.checkout_ready.emit(create_checkout(access_token(settings)))
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
 class MainWindow(QMainWindow):
+    """Main desktop shell. Existing coding workflow remains on the Workspace page."""
+
+    NAV_ITEMS = ("Overview", "Workspace", "Activity", "Account")
+
     def __init__(self):
         super().__init__()
         self.settings = QSettings(APP_ORG, APP_NAME)
         self.worker: AgentWorker | None = None
+        self.auth_worker: DeviceLoginWorker | None = None
+        self.entitlement_worker: EntitlementWorker | None = None
+        self.checkout_worker: CheckoutWorker | None = None
         self.workspace: Path | None = None
+        self.has_access = False
 
         self.setWindowTitle("ManuCodeAI")
-        self.resize(980, 720)
-        self.setMinimumSize(760, 560)
+        self.resize(1180, 790)
+        self.setMinimumSize(900, 650)
 
+        self._build_provider_controls()
+        self._build_shell()
+        self.provider.currentTextChanged.connect(self._provider_changed)
+        self._load_saved_key()
+        self._apply_theme()
+        self._refresh_workspace_label()
+        self.entitlement_timer = QTimer(self)
+        self.entitlement_timer.setInterval(10000)
+        self.entitlement_timer.timeout.connect(self.refresh_entitlement)
+        self.entitlement_timer.start()
+        QTimer.singleShot(700, self.refresh_entitlement)
+
+    def _build_provider_controls(self) -> None:
         self.provider = QComboBox()
         self.provider.addItems(PROVIDERS.keys())
         saved_provider = self.settings.value("provider", "AgentRouter")
         self.provider.setCurrentText(saved_provider if saved_provider in PROVIDERS else "AgentRouter")
-
+        self.provider.setMinimumHeight(42)
         self._active_provider = self.provider.currentText()
-        provider_config = PROVIDERS[self._active_provider]
+        config = PROVIDERS[self._active_provider]
+
         self.base_url = QLineEdit(
-            self.settings.value(f"{self._active_provider}/base_url", provider_config["base_url"])
+            self.settings.value(f"{self._active_provider}/base_url", config["base_url"])
         )
+        self.base_url.setMinimumHeight(42)
+        self.base_url.setMinimumWidth(260)
         self.model = QComboBox()
         self.model.setEditable(True)
+        self.model.setMinimumHeight(42)
+        self.model.setMinimumWidth(220)
         self.model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.model.setCurrentText(
-            self.settings.value(
-                f"{self._active_provider}/model",
-                provider_config.get("default_model", ""),
-            )
+            self.settings.value(f"{self._active_provider}/model", config.get("default_model", ""))
         )
         self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key.setPlaceholderText("Paste your provider API key")
-        self.project_label = QLabel("No project folder selected")
-        self.project_label.setWordWrap(True)
-        self.prompt = QPlainTextEdit()
-        self.prompt.setPlaceholderText("Describe what you want ManuCodeAI to build, change, or fix...")
-        self.prompt.setMinimumHeight(150)
-        self.activity = QPlainTextEdit()
-        self.activity.setReadOnly(True)
-        self.activity.setPlaceholderText("Coding activity will appear here.")
+        self.api_key.setMinimumHeight(42)
+        self.api_key.setMinimumWidth(260)
+        self.api_key.setPlaceholderText("Enter your provider API key")
 
-        choose_button = QPushButton("Open project folder")
-        choose_button.clicked.connect(self.choose_project)
         self.fetch_models_button = QPushButton("Fetch models")
         self.fetch_models_button.clicked.connect(self.fetch_models)
         self.start_button = QPushButton("Start coding")
+        self.start_button.setObjectName("primaryButton")
         self.start_button.clicked.connect(self.start_coding)
+        self.start_button.setEnabled(False)
         self.stop_button = QPushButton("Stop")
+        self.stop_button.setObjectName("dangerButton")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.stop_coding)
 
+        self.project_label = QLabel("No project selected")
+        self.project_label.setObjectName("mutedText")
+        self.project_label.setWordWrap(True)
+        self.prompt = QPlainTextEdit()
+        self.prompt.setPlaceholderText(
+            "Describe what you want ManuCodeAI to build, change, debug, or review..."
+        )
+        self.prompt.setMinimumHeight(170)
+        self.activity = QPlainTextEdit()
+        self.activity.setReadOnly(True)
+        self.activity.setPlaceholderText("Your coding session activity will appear here.")
+
+    def _build_shell(self) -> None:
+        shell = QWidget()
+        shell_layout = QHBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(218)
+        side_layout = QVBoxLayout(sidebar)
+        side_layout.setContentsMargins(18, 24, 18, 20)
+        side_layout.setSpacing(12)
+
+        brand = QLabel("MANU<span style='color:#D4A85C'>CODE</span>AI")
+        brand.setObjectName("brand")
+        side_layout.addWidget(brand)
+        side_layout.addWidget(self._label("DESKTOP AGENT", "eyebrow"))
+        side_layout.addSpacing(18)
+
+        self.navigation = QListWidget()
+        self.navigation.setObjectName("navigation")
+        for name in self.NAV_ITEMS:
+            item = QListWidgetItem(name)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter)
+            self.navigation.addItem(item)
+        self.navigation.setCurrentRow(0)
+        self.navigation.currentRowChanged.connect(self._navigate)
+        side_layout.addWidget(self.navigation, 1)
+
+        side_footer = QLabel("Visible coding. Full control.")
+        side_footer.setObjectName("mutedText")
+        side_layout.addWidget(side_footer)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(30, 24, 30, 24)
+        content_layout.setSpacing(18)
+
+        topbar = QHBoxLayout()
+        topbar.addWidget(self._label("YOUR AI DEVELOPMENT WORKSPACE", "eyebrow"))
+        topbar.addStretch(1)
+        topbar.addWidget(self.stop_button)
+        self.session_status = QLabel("●  READY")
+        self.session_status.setObjectName("statusPill")
+        topbar.addWidget(self.session_status)
+        content_layout.addLayout(topbar)
+
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self._overview_page())
+        self.pages.addWidget(self._workspace_page())
+        self.pages.addWidget(self._activity_page())
+        self.pages.addWidget(self._account_page())
+        content_layout.addWidget(self.pages, 1)
+
+        shell_layout.addWidget(sidebar)
+        shell_layout.addWidget(content, 1)
+        self.setCentralWidget(shell)
+
+    def _label(self, text: str, name: str | None = None) -> QLabel:
+        label = QLabel(text)
+        if name:
+            label.setObjectName(name)
+        return label
+
+    def _card(self, title: str, description: str | None = None) -> tuple[QFrame, QVBoxLayout]:
+        card = QFrame()
+        card.setObjectName("surfaceCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+        heading = self._label(title, "cardTitle")
+        layout.addWidget(heading)
+        if description:
+            layout.addWidget(self._label(description, "mutedText"))
+        return card, layout
+
+    def _overview_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(18)
+
+        layout.addWidget(self._label("Build with an AI coding agent.", "pageTitle"))
+        layout.addWidget(self._label(
+            "Choose a project, describe the work, and watch ManuCodeAI make changes in VS Code.",
+            "mutedText",
+        ))
+
+        cards = QHBoxLayout()
+        cards.setSpacing(14)
+        project_card, project_layout = self._card("CURRENT PROJECT")
+        self.overview_project = self._label("No project selected", "metricValue")
+        self.overview_project.setWordWrap(True)
+        project_layout.addWidget(self.overview_project)
+        project_layout.addWidget(self._label("Your selected local workspace", "mutedText"))
+        cards.addWidget(project_card, 1)
+
+        provider_card, provider_layout = self._card("AI PROVIDER")
+        self.overview_provider = self._label(self.provider.currentText(), "metricValue")
+        provider_layout.addWidget(self.overview_provider)
+        provider_layout.addWidget(self._label("Configured in Workspace settings", "mutedText"))
+        cards.addWidget(provider_card, 1)
+        layout.addLayout(cards)
+
+        action_card, action_layout = self._card(
+            "Start a coding session",
+            "ManuCodeAI works inside your selected project and uses VS Code as the visible editor.",
+        )
+        actions = QHBoxLayout()
+        open_workspace = QPushButton("Open workspace")
+        open_workspace.setObjectName("primaryButton")
+        open_workspace.clicked.connect(lambda: self.navigation.setCurrentRow(1))
+        actions.addWidget(open_workspace)
+        actions.addStretch(1)
+        action_layout.addLayout(actions)
+        layout.addWidget(action_card)
+
+        note_card, note_layout = self._card("YOUR WORKFLOW")
+        note_layout.addWidget(self._label(
+            "1. Configure your AI provider and model.\n"
+            "2. Select the project folder.\n"
+            "3. Describe the task and start coding.\n"
+            "4. Review the changes and test your project.",
+            "bodyText",
+        ))
+        layout.addWidget(note_card)
+        layout.addStretch(1)
+        return page
+
+    def _workspace_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(self._label("Workspace", "pageTitle"))
+        layout.addWidget(self._label(
+            "Configure the model and describe the work you want the agent to perform.",
+            "mutedText",
+        ))
+
+        provider_card, provider_layout = self._card("AI PROVIDER CONFIGURATION")
         form = QFormLayout()
-        form.addRow("AI provider", self.provider)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(16)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.addRow("Provider", self.provider)
         form.addRow("API base URL", self.base_url)
         model_row = QHBoxLayout()
         model_row.addWidget(self.model, 1)
         model_row.addWidget(self.fetch_models_button)
         form.addRow("Model", model_row)
-        form.addRow("API key", self.api_key)
+        form.addRow("Provider API key", self.api_key)
+        provider_layout.addLayout(form)
+        layout.addWidget(provider_card)
 
+        project_card, project_layout = self._card("PROJECT FOLDER")
         project_row = QHBoxLayout()
-        project_row.addWidget(choose_button)
+        choose = QPushButton("Choose folder")
+        choose.clicked.connect(self.choose_project)
+        project_row.addWidget(choose)
         project_row.addWidget(self.project_label, 1)
-        actions = QHBoxLayout()
-        actions.addStretch(1)
-        actions.addWidget(self.stop_button)
-        actions.addWidget(self.start_button)
+        project_layout.addLayout(project_row)
+        layout.addWidget(project_card)
 
-        root = QVBoxLayout()
-        root.addWidget(QLabel("MANUCODEAI  /  STANDALONE CODING AGENT"))
-        root.addLayout(form)
-        root.addLayout(project_row)
-        root.addWidget(QLabel("Instruction"))
-        root.addWidget(self.prompt)
-        root.addLayout(actions)
-        root.addWidget(QLabel("Activity"))
-        root.addWidget(self.activity, 1)
+        task_card, task_layout = self._card("TASK INSTRUCTIONS")
+        task_layout.addWidget(self.prompt)
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        action_row.addWidget(self.start_button)
+        task_layout.addLayout(action_row)
+        layout.addWidget(task_card, 1)
 
-        container = QWidget()
-        container.setLayout(root)
-        self.setCentralWidget(container)
-        self.provider.currentTextChanged.connect(self._provider_changed)
-        self._load_saved_key()
-        self._apply_theme()
+        # The workspace contains several controls and a sizeable task editor.
+        # Keep every field reachable on short laptop displays instead of
+        # allowing the parent layout to compress or clip the provider form.
+        scroll = QScrollArea()
+        scroll.setObjectName("workspaceScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(page)
+        return scroll
+
+    def _activity_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(14)
+        layout.addWidget(self._label("Activity", "pageTitle"))
+        layout.addWidget(self._label(
+            "Live status messages and results from your coding sessions.",
+            "mutedText",
+        ))
+        card, card_layout = self._card("SESSION LOG")
+        card_layout.addWidget(self.activity, 1)
+        layout.addWidget(card, 1)
+        return page
+
+    def _account_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(self._label("Account & access", "pageTitle"))
+        layout.addWidget(self._label(
+            "Your sign-in, free trial, and subscription controls will appear here.",
+            "mutedText",
+        ))
+
+        auth_card, auth_layout = self._card("MANUCODEAI ACCOUNT")
+        auth_layout.addWidget(self._label(
+            "Sign in securely through Clerk. ManuCodeAI opens your browser and displays a one-time code.",
+            "bodyText",
+        ))
+        self.account_email = self._label("Not signed in", "mutedText")
+        auth_layout.addWidget(self.account_email)
+        auth_actions = QHBoxLayout()
+        self.signin_button = QPushButton("Sign in / Create account")
+        self.signin_button.setObjectName("primaryButton")
+        self.signin_button.clicked.connect(self.start_sign_in)
+        self.refresh_access_button = QPushButton("Refresh access")
+        self.refresh_access_button.clicked.connect(self.refresh_entitlement)
+        self.signout_button = QPushButton("Sign out")
+        self.signout_button.clicked.connect(self.sign_out)
+        auth_actions.addWidget(self.signin_button)
+        auth_actions.addWidget(self.refresh_access_button)
+        auth_actions.addWidget(self.signout_button)
+        auth_layout.addLayout(auth_actions)
+        layout.addWidget(auth_card)
+
+        plan_card, plan_layout = self._card("SUBSCRIPTION")
+        price = self._label("KSh 250  /  14 days", "metricValue")
+        plan_layout.addWidget(price)
+        plan_layout.addWidget(self._label(
+            "15-minute free trial. After the trial, purchase is required to continue coding. "
+            "Payments will be processed securely through Paystack.",
+            "mutedText",
+        ))
+        self.account_status = self._label("Sign in to start your 15-minute trial.", "warningText")
+        plan_layout.addWidget(self.account_status)
+        self.checkout_button = QPushButton("Purchase access — KSh 250")
+        self.checkout_button.setObjectName("primaryButton")
+        self.checkout_button.clicked.connect(self.start_checkout)
+        self.checkout_button.setEnabled(False)
+        plan_layout.addWidget(self.checkout_button)
+        layout.addWidget(plan_card)
+        layout.addStretch(1)
+        return page
+
+    def start_sign_in(self) -> None:
+        if self.auth_worker and self.auth_worker.isRunning():
+            return
+        self.signin_button.setEnabled(False)
+        self.account_status.setText("Starting secure Clerk sign-in...")
+        self.auth_worker = DeviceLoginWorker()
+        self.auth_worker.verification.connect(self._show_device_verification)
+        self.auth_worker.authenticated.connect(self._apply_entitlement)
+        self.auth_worker.failed.connect(self._on_auth_failed)
+        self.auth_worker.start()
+
+    def _show_device_verification(self, user_code: str, verification_uri: str) -> None:
+        QDesktopServices.openUrl(QUrl(verification_uri))
+        QMessageBox.information(
+            self, "Complete sign-in in your browser",
+            f"Your one-time sign-in code is:\\n\\n{user_code}\\n\\n"
+            "Approve ManuCodeAI in the browser. Keep this application open.",
+        )
+
+    def _on_auth_failed(self, message: str) -> None:
+        self.signin_button.setEnabled(True)
+        self.account_status.setText(message)
+        QMessageBox.warning(self, "Sign-in failed", message)
+
+    def refresh_entitlement(self) -> None:
+        if self.entitlement_worker and self.entitlement_worker.isRunning():
+            return
+        try:
+            import keyring
+            existing = keyring.get_password("ManuCodeAI", "clerk-refresh-token")
+        except Exception:
+            existing = None
+        if not existing:
+            self.has_access = False
+            self.start_button.setEnabled(False)
+            if hasattr(self, "checkout_button"):
+                self.checkout_button.setEnabled(False)
+            if hasattr(self, "account_status"):
+                self.account_status.setText("Sign in to start your 15-minute free trial.")
+            return
+        self.refresh_access_button.setEnabled(False)
+        self.entitlement_worker = EntitlementWorker()
+        self.entitlement_worker.authenticated.connect(self._apply_entitlement)
+        self.entitlement_worker.failed.connect(self._on_entitlement_failed)
+        self.entitlement_worker.finished.connect(
+            lambda: self.refresh_access_button.setEnabled(True)
+        )
+        self.entitlement_worker.start()
+
+    def _on_entitlement_failed(self, message: str) -> None:
+        self.has_access = False
+        self.start_button.setEnabled(False)
+        self.account_status.setText(message)
+        self.signin_button.setText("Sign in / Create account")
+        self.signin_button.setEnabled(True)
+        self.checkout_button.setEnabled(False)
+
+    def _apply_entitlement(self, entitlement: dict) -> None:
+        self.has_access = bool(entitlement.get("has_access"))
+        status = entitlement.get("status", "unknown")
+        email = entitlement.get("email", "")
+        self.account_email.setText(email or "Signed in")
+        remaining = entitlement.get("seconds_remaining")
+        if status == "trial":
+            minutes = max(0, int(remaining or 0) // 60)
+            seconds = max(0, int(remaining or 0) % 60)
+            self.account_status.setText(f"Free trial active — {minutes}m {seconds}s remaining.")
+        elif status == "subscribed":
+            self.account_status.setText(f"Subscription active until {entitlement.get('paid_until')}.")
+        elif status == "administrator":
+            self.account_status.setText("Administrator access active.")
+        elif status == "suspended":
+            self.account_status.setText("This account has been suspended. Contact support.")
+        else:
+            self.account_status.setText("Your free trial has ended. Purchase access to continue.")
+        self.start_button.setEnabled(self.has_access)
+        self.checkout_button.setEnabled(status not in ("suspended", "administrator"))
+        self.signin_button.setText("Signed in")
+        self.signin_button.setEnabled(True)
+        if not self.has_access and self.worker and self.worker.isRunning():
+            self.stop_coding()
+
+    def start_checkout(self) -> None:
+        if self.checkout_worker and self.checkout_worker.isRunning():
+            return
+        self.checkout_button.setEnabled(False)
+        self.account_status.setText("Creating secure Paystack checkout...")
+        self.checkout_worker = CheckoutWorker()
+        self.checkout_worker.checkout_ready.connect(self._on_checkout_ready)
+        self.checkout_worker.failed.connect(self._on_checkout_failed)
+        self.checkout_worker.finished.connect(
+            lambda: self.checkout_button.setEnabled(True)
+        )
+        self.checkout_worker.start()
+
+    def _on_checkout_ready(self, checkout_url: str) -> None:
+        QDesktopServices.openUrl(QUrl(checkout_url))
+        self.account_status.setText(
+            "Paystack checkout opened in your browser. Complete payment, then select Refresh access."
+        )
+
+    def _on_checkout_failed(self, message: str) -> None:
+        self.account_status.setText(message)
+        QMessageBox.warning(self, "Payment checkout", message)
+
+    def sign_out(self) -> None:
+        try:
+            clear_tokens(self.settings)
+        except Exception as error:
+            QMessageBox.warning(self, "Sign out", f"Could not clear saved credentials: {error}")
+            return
+        self.has_access = False
+        self.start_button.setEnabled(False)
+        self.account_email.setText("Not signed in")
+        self.account_status.setText("Signed out. Sign in to start a new session.")
+        self.signin_button.setText("Sign in / Create account")
+        self.signin_button.setEnabled(True)
+        self.checkout_button.setEnabled(False)
+
+    def _navigate(self, index: int) -> None:
+        if 0 <= index < self.pages.count():
+            self.pages.setCurrentIndex(index)
+
+    def _refresh_workspace_label(self) -> None:
+        if self.workspace:
+            value = str(self.workspace)
+            self.project_label.setText(value)
+            self.overview_project.setText(self.workspace.name)
+        else:
+            self.overview_project.setText("No project selected")
 
     def _apply_theme(self) -> None:
         self.setStyleSheet("""
-            QMainWindow, QWidget { background: #101114; color: #e8e8ea; }
+            QMainWindow, QWidget { background: #0D0F12; color: #E8E9EC; }
+            QFrame#sidebar { background: #090A0C; border-right: 1px solid #24272D; }
+            QLabel#brand { color: #F3F0E8; font-size: 21px; font-weight: 800; padding: 5px 2px; }
+            QLabel#eyebrow { color: #9298A3; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+            QLabel#pageTitle { color: #F4F1E9; font-size: 27px; font-weight: 700; padding: 2px 0; }
+            QLabel#cardTitle { color: #D6B477; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
+            QLabel#metricValue { color: #F4F1E9; font-size: 22px; font-weight: 700; }
+            QLabel#mutedText { color: #9298A3; font-size: 12px; }
+            QLabel#bodyText { color: #D3D5DA; font-size: 13px; line-height: 1.5; }
+            QLabel#statusPill { color: #D7BC83; background: #292216; border: 1px solid #594629;
+                border-radius: 12px; padding: 7px 11px; font-size: 10px; font-weight: 700; }
+            QLabel#warningText { color: #D7BC83; font-size: 12px; }
+            QFrame#surfaceCard { background: #15181D; border: 1px solid #292D35; border-radius: 12px; }
+            QListWidget#navigation { background: transparent; border: 0; outline: 0; }
+            QListWidget#navigation::item { color: #9CA2AD; padding: 13px 12px; border-radius: 7px; margin: 2px 0; }
+            QListWidget#navigation::item:selected { color: #F1D49A; background: #292216; border-left: 3px solid #C49A52; }
             QLineEdit, QComboBox, QPlainTextEdit {
-                background: #191b20; color: #f2f2f3; border: 1px solid #343740;
-                border-radius: 7px; padding: 9px; selection-background-color: #8c6b32;
+                background: #0F1216; color: #F0F1F3; border: 1px solid #505762;
+                border-radius: 7px; padding: 9px; selection-background-color: #765A2E;
             }
-            QPushButton {
-                background: #b58b45; color: #111111; border: 0;
-                border-radius: 7px; padding: 10px 16px; font-weight: 600;
+            QLineEdit, QComboBox { min-height: 22px; }
+            QComboBox { padding-right: 28px; }
+            QComboBox::drop-down {
+                subcontrol-origin: padding; subcontrol-position: top right;
+                width: 25px; border-left: 1px solid #505762;
             }
-            QPushButton:disabled { background: #45464b; color: #999999; }
-            QLabel { color: #e5e5e7; padding: 3px; }
+            QComboBox QLineEdit {
+                background: transparent; color: #F0F1F3; border: 0; padding: 0 5px;
+            }
+            QPlainTextEdit { padding: 12px; }
+            QPushButton { background: #292D34; color: #E8E9EC; border: 1px solid #3B404A;
+                border-radius: 7px; padding: 10px 15px; font-weight: 600; }
+            QPushButton:hover { background: #363B44; }
+            QPushButton#primaryButton { background: #C49A52; color: #101114; border: 0; }
+            QPushButton#primaryButton:hover { background: #D5AE6A; }
+            QPushButton#dangerButton { background: #3A2022; color: #F0B8B8; border: 1px solid #6B3438; }
+            QPushButton:disabled { background: #282B30; color: #737983; border-color: #30343B; }
+            QComboBox QAbstractItemView { background: #171A20; color: #F0F1F3; selection-background-color: #765A2E; }
         """)
 
     def _keyring_name(self, provider: str | None = None) -> str:
@@ -221,10 +687,10 @@ class MainWindow(QMainWindow):
         self.model.clear()
         self.model.setCurrentText(
             self.settings.value(
-                f"{provider}/model",
-                PROVIDERS[provider].get("default_model", ""),
+                f"{provider}/model", PROVIDERS[provider].get("default_model", "")
             )
         )
+        self.overview_provider.setText(provider)
 
     def _save_settings(self) -> None:
         current_provider = self.provider.currentText()
@@ -244,7 +710,7 @@ class MainWindow(QMainWindow):
         selected = QFileDialog.getExistingDirectory(self, "Select project folder")
         if selected:
             self.workspace = Path(selected).resolve()
-            self.project_label.setText(str(self.workspace))
+            self._refresh_workspace_label()
             self._log(f"Project selected: {self.workspace}")
 
     def fetch_models(self) -> None:
@@ -258,10 +724,7 @@ class MainWindow(QMainWindow):
             return
         key = self.api_key.text().strip()
         if not key:
-            QMessageBox.warning(
-                self, "API key required",
-                f"Enter your {provider} API key first.",
-            )
+            QMessageBox.warning(self, "API key required", f"Enter your {provider} API key first.")
             return
         self.fetch_models_button.setEnabled(False)
         self._log(f"Fetching available {provider} models...")
@@ -286,6 +749,13 @@ class MainWindow(QMainWindow):
     def start_coding(self) -> None:
         if self.worker and self.worker.isRunning():
             return
+        if not self.has_access:
+            self.navigation.setCurrentRow(3)
+            QMessageBox.information(
+                self, "Access required",
+                "Sign in and start your free trial, or purchase a subscription before coding.",
+            )
+            return
         api_key = self.api_key.text().strip()
         model = self.model.currentText().strip()
         instruction = self.prompt.toPlainText().strip()
@@ -305,6 +775,8 @@ class MainWindow(QMainWindow):
         self._save_settings()
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+        self.session_status.setText("●  RUNNING")
+        self.navigation.setCurrentRow(2)
         self._log(f"\n--- New coding session ({self.provider.currentText()}) ---")
         self.worker = AgentWorker(
             self.provider.currentText(), api_key, self.base_url.text().strip(),
@@ -318,14 +790,16 @@ class MainWindow(QMainWindow):
     def _on_completed(self, message: str) -> None:
         self._log("\n" + message)
         self._log("--- Coding session finished ---")
+        self.session_status.setText("●  READY")
         self._set_idle()
 
     def _on_failed(self, message: str) -> None:
         self._log(f"Session stopped: {message}")
+        self.session_status.setText("●  READY")
         self._set_idle()
 
     def _set_idle(self) -> None:
-        self.start_button.setEnabled(True)
+        self.start_button.setEnabled(self.has_access)
         self.stop_button.setEnabled(False)
 
     def stop_coding(self) -> None:
@@ -337,6 +811,14 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self.worker.cancel_event.set()
             self.worker.wait(1500)
+        if self.auth_worker and self.auth_worker.isRunning():
+            self.auth_worker.cancel()
+            self.auth_worker.wait(10000)
+        if self.entitlement_timer:
+            self.entitlement_timer.stop()
+        for background_worker in (self.entitlement_worker, self.checkout_worker):
+            if background_worker and background_worker.isRunning():
+                background_worker.wait(11000)
         event.accept()
 
 
