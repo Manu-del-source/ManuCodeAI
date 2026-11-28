@@ -59,19 +59,41 @@ class ReleaseCheckWorker(QThread):
                 return
 
             assets = {
-                item.get("name"): item.get("browser_download_url")
+                item.get("name"): item
                 for item in release.get("assets", [])
             }
-            installer_url = assets.get("ManuCodeAI-Setup.exe")
-            checksum_url = assets.get("SHA256SUMS.txt")
-            if not installer_url or not checksum_url:
+            installer_asset = assets.get("ManuCodeAI-Setup.exe")
+            checksum_asset = assets.get("SHA256SUMS.txt")
+            installer_url = (
+                installer_asset.get("browser_download_url")
+                if installer_asset else None
+            )
+            checksum_url = (
+                checksum_asset.get("browser_download_url")
+                if checksum_asset else None
+            )
+            digest_value = str(
+                installer_asset.get("digest") or ""
+            ).strip().lower() if installer_asset else ""
+            expected_sha256 = (
+                digest_value.removeprefix("sha256:")
+                if digest_value.startswith("sha256:") else ""
+            )
+            if not installer_url:
                 raise RuntimeError(
-                    "The latest release does not contain the Windows installer and checksum file."
+                    "The latest release does not contain ManuCodeAI-Setup.exe."
+                )
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+                expected_sha256 = ""
+            if not expected_sha256 and not checksum_url:
+                raise RuntimeError(
+                    "GitHub did not provide an installer SHA-256 digest or checksum file."
                 )
             self.available.emit({
                 "version": latest,
                 "notes": str(release.get("body") or "").strip(),
                 "installer_url": installer_url,
+                "expected_sha256": expected_sha256,
                 "checksum_url": checksum_url,
                 "html_url": str(release.get("html_url") or ""),
             })
@@ -89,14 +111,18 @@ class InstallerDownloadWorker(QThread):
 
     def run(self) -> None:
         try:
-            checksum_text = _request(self.release["checksum_url"]).decode("utf-8")
-            expected = None
-            for line in checksum_text.splitlines():
-                parts = line.strip().split()
-                if len(parts) >= 2 and parts[-1].lstrip("*") == "ManuCodeAI-Setup.exe":
-                    expected = parts[0].lower()
-                    break
-            if not expected or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            expected = str(self.release.get("expected_sha256") or "").strip().lower()
+            if not expected:
+                checksum_url = self.release.get("checksum_url")
+                if not checksum_url:
+                    raise RuntimeError("GitHub did not provide an installer SHA-256 digest.")
+                checksum_text = _request(checksum_url).decode("utf-8")
+                for line in checksum_text.splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[-1].lstrip("*") == "ManuCodeAI-Setup.exe":
+                        expected = parts[0].lower()
+                        break
+            if not re.fullmatch(r"[0-9a-f]{64}", expected):
                 raise RuntimeError("The release does not contain a valid installer SHA-256 checksum.")
 
             target_dir = Path(tempfile.gettempdir()) / "ManuCodeAI-Updates"
@@ -117,8 +143,13 @@ class InstallerDownloadWorker(QThread):
                                 break
                             digest.update(chunk)
                             output.write(chunk)
-                if digest.hexdigest() != expected:
-                    raise RuntimeError("The downloaded installer failed SHA-256 verification.")
+                actual = digest.hexdigest()
+                if actual != expected:
+                    raise RuntimeError(
+                        "The downloaded installer failed SHA-256 verification. "
+                        f"Expected {expected}, received {actual}. "
+                        "The installer was discarded for your safety."
+                    )
                 temporary.replace(target)
             finally:
                 if temporary.exists():
