@@ -417,7 +417,8 @@ class CodingAgent:
                 except (OSError, UnicodeDecodeError, ValueError):
                     actual = ""
                 intended = attempt.get("content_sha256")
-                if intended and actual == intended:                    item["status"] = "VALIDATION_PENDING"
+                if intended and actual == intended:
+                    item["status"] = "VALIDATION_PENDING"
                     item["saved_sha256"] = actual
                     item["verification_or_reason"] = (
                         "Recovered interrupted write: saved content matches the intended hash. "
