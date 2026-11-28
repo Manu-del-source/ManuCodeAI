@@ -982,6 +982,7 @@ class CodingAgent:
                 result = subprocess.run(
                     invocation, cwd=self.workspace, capture_output=True,
                     text=True, timeout=180,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
                 )
             else:
                 result = subprocess.run(
