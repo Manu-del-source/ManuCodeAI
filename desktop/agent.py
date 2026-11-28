@@ -1256,7 +1256,8 @@ class CodingAgent:
             self.progress["completed_at"] = datetime.now(timezone.utc).isoformat()
             self.progress["final_summary"] = result[-4000:]
             self._save_progress()
-            return result        except Exception as error:
+            return result
+        except Exception as error:
             self.progress["status"] = "paused"
             self.progress["last_error"] = str(error)[:1000]
             self.progress["paused_at"] = datetime.now(timezone.utc).isoformat()
