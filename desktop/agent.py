@@ -21,6 +21,7 @@ from openai import OpenAI
 from anthropic import Anthropic
 
 from .vscode import VSCodeController
+from .command_policy import blocked_install_command
 
 
 IGNORED_DIRS = {
@@ -118,7 +119,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_command",
-            "description": "Run a project command autonomously in the selected project directory using PowerShell on Windows or the configured shell on Linux. Application startup and integration tests are blocked until complete_implementation succeeds.",
+            "description": "Run a project command autonomously in the selected project directory. Dependency installation, download, update, and removal commands are always blocked; the user installs dependencies manually. Application startup and integration tests are blocked until complete_implementation succeeds.",
             "parameters": {
                 "type": "object",
                 "properties": {"command": {"type": "string"}},
@@ -137,8 +138,7 @@ TOOLS = [
     },
     {
         "type": "function",
-        "function": {
-            "name": "update_file_status",
+        "function": {            "name": "update_file_status",
             "description": "Set a planned file to IN_PROGRESS, COMPLETED after validation, or NEEDS_CORRECTION. A saved file stays VALIDATION_PENDING until focused tests/static checks have been run and its current contents have been read back. Include the actual validation result when marking it COMPLETED. Mark NEEDS_CORRECTION with a concrete reason when a check fails.",
             "parameters": {"type":"object","properties":{"filename":{"type":"string"},"status":{"type":"string","enum":["IN_PROGRESS","COMPLETED","NEEDS_CORRECTION"]},"verification_or_reason":{"type":"string"}},"required":["filename","status","verification_or_reason"],"additionalProperties":False}
         }
@@ -223,6 +223,7 @@ DEVELOPER WORKFLOW — FOLLOW THIS ORDER:
     test results, and anything not verified or still blocked.
 
 RULES:
+- Never install, download, update, upgrade, or uninstall project dependencies or packages. This applies to every project, language, package manager, and provider. You may create or update dependency manifests, inspect the environment, and run checks that use already-installed tools. If a dependency is missing, tell the user the exact manual installation command and continue implementing other files without attempting the installation.
 - Do not ask the user to approve individual file changes or terminal commands.
 - Never claim a file changed unless write_file reports success.
 - Never read, print, copy, or modify secrets, credentials, private keys, or .env files.
@@ -277,8 +278,7 @@ def discover_models(api_key: str, base_url: str, provider: str = "") -> list[str
             return sorted({
                 item["name"].removeprefix("models/")
                 for item in payload.get("models", [])
-                if "generateContent" in item.get("supportedGenerationMethods", [])
-            })
+                if "generateContent" in item.get("supportedGenerationMethods", [])            })
 
         client = OpenAI(api_key=api_key, base_url=base_url.rstrip("/"), timeout=25.0)
         response = client.models.list()
@@ -417,8 +417,7 @@ class CodingAgent:
                 except (OSError, UnicodeDecodeError, ValueError):
                     actual = ""
                 intended = attempt.get("content_sha256")
-                if intended and actual == intended:
-                    item["status"] = "VALIDATION_PENDING"
+                if intended and actual == intended:                    item["status"] = "VALIDATION_PENDING"
                     item["saved_sha256"] = actual
                     item["verification_or_reason"] = (
                         "Recovered interrupted write: saved content matches the intended hash. "
@@ -557,8 +556,7 @@ class CodingAgent:
             if first_unfinished and first_unfinished != relative:
                 return (
                     f"Status update rejected: finish {first_unfinished} before starting "
-                    f"{relative}. The saved plan must be followed in order."
-                )
+                    f"{relative}. The saved plan must be followed in order."                )
         if not verification_or_reason.strip():
             return "Status update rejected: include a verification note or concrete correction reason."
         if status == "COMPLETED":
@@ -697,8 +695,7 @@ class CodingAgent:
                 f"Forward-progress guard: {relative} was just changed successfully. "
                 "Move to a different unfinished file before making another change here. "
                 "Do not retry this file; select the next file in your implementation checklist."
-            )
-        if targeted_edit and self._successful_edits.get(relative, 0) >= 2:
+            )        if targeted_edit and self._successful_edits.get(relative, 0) >= 2:
             return (
                 f"Edit limit reached for {relative}: two targeted edits have already succeeded "
                 "in this session. Move to another unfinished file. Revisit only after a concrete "
@@ -837,8 +834,7 @@ class CodingAgent:
         return (
             f"Successfully typed visibly in VS Code, saved, and read-back verified {relative}. "
             "It is now VALIDATION_PENDING, not completed. Run focused tests, lint/type checks, "
-            "or syntax checks; inspect the output; read the file again; then call "
-            "update_file_status with status COMPLETED and the actual validation result. "
+            "or syntax checks; inspect the output; read the file again; then call "            "update_file_status with status COMPLETED and the actual validation result. "
             "If a check fails, mark NEEDS_CORRECTION with the concrete failure and fix it."
         )
 
@@ -933,6 +929,9 @@ class CodingAgent:
 
     def _run_command(self, command: str) -> str:
         self._check_cancelled()
+        install_block = blocked_install_command(command)
+        if install_block:
+            return install_block
         # Source files must only be changed through write_file/edit_file so the
         # preflight validators and visible VS Code typing cannot be bypassed.
         mutation_patterns = (
@@ -977,8 +976,7 @@ class CodingAgent:
             if os.name == "nt":
                 invocation = [
                     "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
-                    "-ExecutionPolicy", "Bypass", "-Command", command,
-                ]
+                    "-ExecutionPolicy", "Bypass", "-Command", command,                ]
                 result = subprocess.run(
                     invocation, cwd=self.workspace, capture_output=True,
                     text=True, timeout=180,
@@ -1117,8 +1115,7 @@ class CodingAgent:
                     "role": "user",
                     "content": (
                         "Your previous response did not execute any coding tools. This is not "
-                        "a completed task. Continue implementation now: inspect relevant files, "
-                        "update the ordered file plan, make actual file changes using coding tools, "
+                        "a completed task. Continue implementation now: inspect relevant files, "                        "update the ordered file plan, make actual file changes using coding tools, "
                         "validate them, and call complete_implementation only after every planned "
                         "file is verified. Do not return another architecture proposal."
                     ),
@@ -1257,8 +1254,7 @@ class CodingAgent:
             self.progress["completed_at"] = datetime.now(timezone.utc).isoformat()
             self.progress["final_summary"] = result[-4000:]
             self._save_progress()
-            return result
-        except Exception as error:
+            return result        except Exception as error:
             self.progress["status"] = "paused"
             self.progress["last_error"] = str(error)[:1000]
             self.progress["paused_at"] = datetime.now(timezone.utc).isoformat()
