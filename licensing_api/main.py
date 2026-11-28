@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -29,7 +31,7 @@ def create_tables() -> None:
 def root() -> str:
     return """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#090b10"><meta name="description" content="ManuCodeAI is an AI-powered desktop coding assistant that helps you understand, write and improve code from your workspace.">
+<meta name="theme-color" content="#090b10"><link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16x16.png"><link rel="manifest" href="/static/site.webmanifest"><meta name="description" content="ManuCodeAI is an AI-powered desktop coding assistant that helps you understand, write and improve code from your workspace.">
 <title>ManuCodeAI — Your AI coding workspace</title>
 <style>
 :root{color-scheme:dark;--bg:#090b10;--panel:#11151d;--panel2:#151b25;--line:#252d3a;--text:#f4f6fa;--muted:#a4adbb;--gold:#d4ad68;--gold2:#f0d49d;--blue:#8ba9d8;--max:1160px}
@@ -279,3 +281,7 @@ s.onload=async()=>{await Clerk.load();if(Clerk.user){clerkToken=await Clerk.sess
 s.onerror=()=>message.textContent='Could not load Clerk authentication.';document.head.appendChild(s);})();
 </script></body></html>"""
     return html.replace("__CLERK_PUBLISHABLE_KEY__", json.dumps(settings.clerk_publishable_key))
+
+
+# Serve the supplied website favicon package.
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
