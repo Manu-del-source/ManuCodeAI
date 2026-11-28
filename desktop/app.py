@@ -18,8 +18,11 @@ from .vscode import VSCodeController
 from .typing_engine import KeyboardKillSwitch
 from .clerk_auth import (
     access_token, begin_device_authorization, clear_tokens, create_checkout,
-    fetch_entitlement, poll_device_authorization, store_tokens,
+    fetch_entitlement, fetch_payment_history, fetch_admin_dashboard,
+    admin_grant_access, admin_set_user_suspended,
+    poll_device_authorization, store_tokens,
 )
+from .account_dashboard import AccountDashboard
 from .updater import (
     ReleaseCheckWorker, InstallerDownloadWorker, launch_windows_installer,
 )
@@ -160,10 +163,57 @@ class CheckoutWorker(QThread):
             self.failed.emit(str(error))
 
 
+
+class DashboardDataWorker(QThread):
+    loaded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, settings):
+        super().__init__()
+        self.settings = settings
+
+    def run(self) -> None:
+        try:
+            token = access_token(self.settings)
+            entitlement = fetch_entitlement(token)
+            payments = fetch_payment_history(token)
+            admin = fetch_admin_dashboard(token) if entitlement.get("is_admin") else None
+            self.loaded.emit({
+                "entitlement": entitlement,
+                "payments": payments,
+                "admin": admin,
+            })
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
+class AdminActionWorker(QThread):
+    completed = Signal()
+    failed = Signal(str)
+
+    def __init__(self, settings, action: str, user_id: str, value):
+        super().__init__()
+        self.settings = settings
+        self.action = action
+        self.user_id = user_id
+        self.value = value
+
+    def run(self) -> None:
+        try:
+            token = access_token(self.settings)
+            if self.action == "grant":
+                admin_grant_access(token, self.user_id, int(self.value))
+            else:
+                admin_set_user_suspended(token, self.user_id, bool(self.value))
+            self.completed.emit()
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
 class MainWindow(QMainWindow):
     """Main desktop shell. Existing coding workflow remains on the Workspace page."""
 
-    NAV_ITEMS = ("Overview", "Workspace", "Activity", "Account")
+    NAV_ITEMS = ("Overview", "Workspace", "Activity", "Dashboard", "Account")
 
     def __init__(self):
         super().__init__()
@@ -174,6 +224,10 @@ class MainWindow(QMainWindow):
         self.checkout_worker: CheckoutWorker | None = None
         self.workspace: Path | None = None
         self.has_access = False
+        self.dashboard_worker = None
+        self.admin_action_worker = None
+        self._dashboard_needs_refresh = True
+        self._last_admin_role = False
 
         self.setWindowTitle("ManuCodeAI")
         self.resize(1180, 790)
@@ -296,6 +350,11 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self._overview_page())
         self.pages.addWidget(self._workspace_page())
         self.pages.addWidget(self._activity_page())
+        self.dashboard = AccountDashboard()
+        self.dashboard.refreshRequested.connect(self._request_dashboard_refresh)
+        self.dashboard.grantRequested.connect(self._grant_user_access)
+        self.dashboard.suspensionRequested.connect(self._set_user_suspended)
+        self.pages.addWidget(self.dashboard)
         self.pages.addWidget(self._account_page())
         content_layout.addWidget(self.pages, 1)
 
@@ -443,6 +502,80 @@ class MainWindow(QMainWindow):
         card_layout.addWidget(self.activity, 1)
         layout.addWidget(card, 1)
         return page
+
+
+    def _request_dashboard_refresh(self) -> None:
+        self._dashboard_needs_refresh = True
+        self.refresh_dashboard()
+
+    def refresh_dashboard(self) -> None:
+        if not hasattr(self, "dashboard") or not self._dashboard_needs_refresh:
+            return
+        if self.dashboard_worker and self.dashboard_worker.isRunning():
+            return
+        try:
+            import keyring
+            if not keyring.get_password("ManuCodeAI", "clerk-refresh-token"):
+                return
+        except Exception:
+            return
+        self.dashboard_worker = DashboardDataWorker(self.settings)
+        self.dashboard_worker.loaded.connect(self._apply_dashboard_data)
+        self.dashboard_worker.failed.connect(self._dashboard_failed)
+        self.dashboard_worker.start()
+
+    def _apply_dashboard_data(self, data: dict) -> None:
+        entitlement = data.get("entitlement") or {}
+        self.dashboard.set_entitlement(entitlement)
+        self.dashboard.apply_user_payments(data.get("payments") or [])
+        admin_data = data.get("admin")
+        if admin_data:
+            self.dashboard.apply_admin_data(admin_data)
+        self._dashboard_needs_refresh = False
+        self._last_admin_role = bool(entitlement.get("is_admin"))
+
+    def _dashboard_failed(self, message: str) -> None:
+        self._dashboard_needs_refresh = False
+        self._log(f"Dashboard refresh failed: {message}")
+        QMessageBox.warning(self, "Account dashboard", message)
+
+    def _grant_user_access(self, user_id: str, days: int) -> None:
+        answer = QMessageBox.question(
+            self, "Grant access",
+            f"Grant {days} days of access to this user?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._run_admin_action("grant", user_id, days)
+
+    def _set_user_suspended(self, user_id: str, suspended: bool) -> None:
+        action = "suspend" if suspended else "restore"
+        answer = QMessageBox.question(
+            self, f"{action.title()} user",
+            f"{action.title()} this user's ManuCodeAI access?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._run_admin_action("suspend", user_id, suspended)
+
+    def _run_admin_action(self, action: str, user_id: str, value) -> None:
+        if self.admin_action_worker and self.admin_action_worker.isRunning():
+            return
+        self.admin_action_worker = AdminActionWorker(self.settings, action, user_id, value)
+        self.admin_action_worker.completed.connect(self._admin_action_completed)
+        self.admin_action_worker.failed.connect(
+            lambda message: QMessageBox.warning(self, "Administrator action failed", message)
+        )
+        self.admin_action_worker.start()
+
+    def _admin_action_completed(self) -> None:
+        QMessageBox.information(self, "Administrator", "The account update was saved.")
+        self._dashboard_needs_refresh = True
+        self.refresh_dashboard()
 
     def _account_page(self) -> QWidget:
         page = QWidget()
@@ -609,6 +742,13 @@ class MainWindow(QMainWindow):
 
     def _apply_entitlement(self, entitlement: dict) -> None:
         self.has_access = bool(entitlement.get("has_access"))
+        if hasattr(self, "dashboard"):
+            self.dashboard.set_entitlement(entitlement)
+            is_admin = bool(entitlement.get("is_admin"))
+            if is_admin != self._last_admin_role:
+                self._dashboard_needs_refresh = True
+            if self._dashboard_needs_refresh:
+                QTimer.singleShot(250, self.refresh_dashboard)
         status = entitlement.get("status", "unknown")
         email = entitlement.get("email", "")
         self.account_email.setText(email or "Signed in")
@@ -668,6 +808,12 @@ class MainWindow(QMainWindow):
         self.signin_button.setText("Sign in / Create account")
         self.signin_button.setEnabled(True)
         self.checkout_button.setEnabled(False)
+        self.dashboard.email_value.setText("Not signed in")
+        self.dashboard.access_value.setText("Sign in to view your account dashboard.")
+        self.dashboard.apply_user_payments([])
+        self.dashboard.admin_panel.hide()
+        self._dashboard_needs_refresh = True
+        self._last_admin_role = False
 
     def _navigate(self, index: int) -> None:
         if 0 <= index < self.pages.count():
@@ -816,7 +962,7 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             return
         if not self.has_access:
-            self.navigation.setCurrentRow(3)
+            self.navigation.setCurrentRow(4)
             QMessageBox.information(
                 self, "Access required",
                 "Sign in and start your free trial, or purchase a subscription before coding.",
@@ -882,7 +1028,7 @@ class MainWindow(QMainWindow):
             self.auth_worker.wait(10000)
         if self.entitlement_timer:
             self.entitlement_timer.stop()
-        for background_worker in (self.entitlement_worker, self.checkout_worker):
+        for background_worker in (self.entitlement_worker, self.checkout_worker, self.dashboard_worker, self.admin_action_worker):
             if background_worker and background_worker.isRunning():
                 background_worker.wait(11000)
         event.accept()
