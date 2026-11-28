@@ -696,7 +696,8 @@ class CodingAgent:
                 f"Forward-progress guard: {relative} was just changed successfully. "
                 "Move to a different unfinished file before making another change here. "
                 "Do not retry this file; select the next file in your implementation checklist."
-            )        if targeted_edit and self._successful_edits.get(relative, 0) >= 2:
+            )
+        if targeted_edit and self._successful_edits.get(relative, 0) >= 2:
             return (
                 f"Edit limit reached for {relative}: two targeted edits have already succeeded "
                 "in this session. Move to another unfinished file. Revisit only after a concrete "
