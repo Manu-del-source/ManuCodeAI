@@ -34,7 +34,7 @@ SECRET_NAMES = {
 SECRET_SUFFIXES = {".pem", ".key", ".p12", ".pfx"}
 
 try:
-    MAX_AGENT_ROUNDS = max(12, int(os.environ.get("MANUCODE_MAX_ROUNDS", "60")))
+    MAX_AGENT_ROUNDS = max(12, int(os.environ.get("MANUCODE_MAX_ROUNDS", "180")))
 except ValueError:
     MAX_AGENT_ROUNDS = 60
 CONTINUATION_INTERVAL = 12

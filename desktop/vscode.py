@@ -22,10 +22,10 @@ class VSCodeController:
     def __init__(self):
         # Keep one typing engine for the session so its natural timing stays consistent.
         self.typing_engine = create_typing_engine(
-            min_delay=0.18,
-            max_delay=0.28,
-            line_delay_min=1.00,
-            line_delay_max=1.40,
+            min_delay=0.07,
+            max_delay=0.15,
+            line_delay_min=0.35,
+            line_delay_max=0.85,
         )
 
     @staticmethod

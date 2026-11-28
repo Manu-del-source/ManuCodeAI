@@ -132,14 +132,15 @@ class KeyboardKillSwitch:
 class WindowsTypingEngine:
     """Types code progressively with a steady pace and small natural pauses."""
 
-    def __init__(self, min_delay: float = 0.18, max_delay: float = 0.28,
-                 line_delay_min: float = 1.00, line_delay_max: float = 1.40):
+    def __init__(self, min_delay: float = 0.07, max_delay: float = 0.15,
+                 line_delay_min: float = 0.35, line_delay_max: float = 0.85):
         # Slow, deliberate human-style character entry with a natural pause between lines.
         self.min_delay = min_delay
         self.max_delay = max_delay
         self.line_delay_min = line_delay_min
         self.line_delay_max = line_delay_max
         self._random = random.Random()
+        self._next_thinking_pause = self._random.randint(220, 360)
 
     @staticmethod
     def _send_input(scan_code: int, flags: int) -> None:
@@ -280,13 +281,18 @@ class WindowsTypingEngine:
                 else:
                     delay = self._random.uniform(self.min_delay, self.max_delay)
                     if character in ",;":
-                        delay += self._random.uniform(0.16, 0.28)
+                        delay += self._random.uniform(0.18, 0.42)
                     elif character in ".!?":
-                        delay += self._random.uniform(0.22, 0.38)
+                        delay += self._random.uniform(0.25, 0.55)
                     elif character in "{}[]()":
                         delay += self._random.uniform(0.06, 0.13)
                     elif character == " ":
-                        delay += self._random.uniform(0.02, 0.05)
+                        delay += self._random.uniform(0.02, 0.06)
+
+                # Add occasional short thinking pauses between typing bursts.
+                if index >= self._next_thinking_pause:
+                    delay += self._random.uniform(1.0, 2.8)
+                    self._next_thinking_pause = index + self._random.randint(220, 360)
 
                 if cancel_event:
                     if cancel_event.wait(delay):
@@ -313,13 +319,14 @@ class WindowsTypingEngine:
 class LinuxTypingEngine:
     """Visible Linux keyboard typing using xdotool and the desktop clipboard."""
 
-    def __init__(self, min_delay: float = 0.18, max_delay: float = 0.28,
-                 line_delay_min: float = 1.00, line_delay_max: float = 1.40):
+    def __init__(self, min_delay: float = 0.07, max_delay: float = 0.15,
+                 line_delay_min: float = 0.35, line_delay_max: float = 0.85):
         self.min_delay = min_delay
         self.max_delay = max_delay
         self.line_delay_min = line_delay_min
         self.line_delay_max = line_delay_max
         self._random = random.Random()
+        self._next_thinking_pause = self._random.randint(220, 360)
         self._clipboard_tool = (
             "wl-copy" if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy")
             else "xclip" if shutil.which("xclip")
@@ -406,13 +413,16 @@ class LinuxTypingEngine:
                 else:
                     delay = self._random.uniform(self.min_delay, self.max_delay)
                     if character in ",;":
-                        delay += self._random.uniform(0.16, 0.28)
+                        delay += self._random.uniform(0.18, 0.42)
                     elif character in ".!?":
-                        delay += self._random.uniform(0.22, 0.38)
+                        delay += self._random.uniform(0.25, 0.55)
                     elif character in "{}[]()":
                         delay += self._random.uniform(0.06, 0.13)
                     elif character == " ":
-                        delay += self._random.uniform(0.02, 0.05)
+                        delay += self._random.uniform(0.02, 0.06)
+                if index >= self._next_thinking_pause:
+                    delay += self._random.uniform(1.0, 2.8)
+                    self._next_thinking_pause = index + self._random.randint(220, 360)
                 if cancel_event:
                     if cancel_event.wait(delay):
                         raise TypingCancelled("Typing was stopped by the user.")
