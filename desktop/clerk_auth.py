@@ -248,3 +248,53 @@ def create_checkout(token: str) -> str:
     if not url:
         raise RuntimeError("The licensing service did not return a Paystack checkout URL.")
     return url
+
+
+def _licensing_request(token: str, method: str, path: str, payload: dict | None = None):
+    base = licensing_api_url()
+    if not base:
+        raise RuntimeError("MANUCODEAI_LICENSING_API_URL is not configured.")
+    try:
+        response = httpx.request(
+            method, f"{base}{path}",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload, timeout=10.0,
+        )
+        response.raise_for_status()
+        return response.json() if response.content else {}
+    except httpx.HTTPStatusError as error:
+        try:
+            detail = error.response.json().get("detail", "The licensing request failed.")
+        except ValueError:
+            detail = "The licensing request failed."
+        raise RuntimeError(detail) from error
+    except (httpx.HTTPError, ValueError) as error:
+        raise RuntimeError("Could not reach the ManuCodeAI licensing service.") from error
+
+
+def fetch_payment_history(token: str) -> list[dict]:
+    return _licensing_request(token, "GET", "/api/v1/billing/payments")
+
+
+def fetch_admin_dashboard(token: str) -> dict:
+    overview = _licensing_request(token, "GET", "/api/v1/admin/overview")
+    users = _licensing_request(token, "GET", "/api/v1/admin/users")
+    payments = _licensing_request(token, "GET", "/api/v1/admin/payments")
+    config = _licensing_request(token, "GET", "/api/v1/admin/config")
+    return {"overview": overview, "users": users, "payments": payments, "config": config}
+
+
+def admin_grant_access(token: str, user_id: str, days: int = 14) -> dict:
+    from urllib.parse import quote
+    return _licensing_request(
+        token, "POST", f"/api/v1/admin/users/{quote(user_id, safe='')}/grant",
+        {"days": days},
+    )
+
+
+def admin_set_user_suspended(token: str, user_id: str, suspended: bool) -> dict:
+    from urllib.parse import quote
+    return _licensing_request(
+        token, "PATCH", f"/api/v1/admin/users/{quote(user_id, safe='')}",
+        {"suspended": suspended},
+    )
